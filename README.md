@@ -52,12 +52,14 @@ The Queue Master Balancer may be configured in the `rabbitmq.config` file as fol
 
 The following table summarizes the meaning of these configuration parameters.
 
+
 | PARAMETER NAME  | DESCRIPTION  | TYPE  |  DEFAULT | 
-|---|---|---|---|---|
+|---|---|---|---|
 | operational\_priority  | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |  
-| preload\_queues | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |   |
-| sync\_delay_timeout | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before the balancing procedure is completed  | Integer | 3000 |   |
-| inter\_policy_delay | Time period (in milliseconds) the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue | Integer | 50  |   |
+| preload\_queues | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
+| sync\_delay_timeout | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before the balancing procedure is completed  | Integer | 3000 |
+| inter\_policy_delay | Time period (in milliseconds) the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue | Integer | 50  |
+
 
 ## Operation
 
