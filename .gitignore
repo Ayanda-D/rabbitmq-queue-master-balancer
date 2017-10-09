@@ -1,0 +1,14 @@
+.sw?
+.*.sw?
+*.beam
+.erlang.mk/
+/cover/
+/deps/
+/doc/
+/ebin/
+/logs/
+/plugins/
+/xrefr
+/test
+
+rabbitmq_queue_master_balancer.d
