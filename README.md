@@ -45,7 +45,7 @@ The Queue Master Balancer may be configured in the `rabbitmq.config` file as fol
      [{operational_priority, 5},
       {preload_queues,       false},
       {sync_delay_timeout,   3000},
-      {inter_policy_delay,   10}]
+      {inter_policy_delay,   50}]
  }].
 
 ```
