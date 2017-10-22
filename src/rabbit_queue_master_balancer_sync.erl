@@ -16,17 +16,18 @@
 
 -module(rabbit_queue_master_balancer_sync).
 
--export([sync_mirrors/1, verify_sync/3, verify_sync/4]).
+-export([sync_mirrors/2, verify_sync/3, verify_sync/4]).
 
 -include("rabbit_queue_master_balancer.hrl").
 
 % ---------------------------------------------------------------
--spec sync_mirrors(rabbit_types:amqqueue() | pid())      -> 'ok'.
--spec verify_sync(binary(), binary(), list())            -> 'ok'.
--spec verify_sync(binary(), binary(), list(), integer()) -> 'ok'.
+-spec sync_mirrors(list(), rabbit_types:amqqueue() | pid()) -> 'ok'.
+-spec verify_sync(binary(), binary(), list())               -> 'ok'.
+-spec verify_sync(binary(), binary(), list(), integer())    -> 'ok'.
 % ----------------------------------------------------------------
 
-sync_mirrors(Q) ->
+sync_mirrors([], _Q)    -> ok;
+sync_mirrors(_SPids, Q) ->
   _Any = rabbit_amqqueue:sync_mirrors(Q),
   ok.
 

@@ -9,6 +9,5 @@
 /logs/
 /plugins/
 /xrefr
-/test
 
 rabbitmq_queue_master_balancer.d

@@ -18,14 +18,12 @@
 -behaviour(gen_fsm).
 
 -export([start_link/0, load_queues/0, go/0, pause/0, continue/0,
-         info/0, reset/0, stop/0, shutdown/0]).
+         info/0, reset/0, report/0, stop/0, shutdown/0]).
 
 -export([init/1, handle_event/3, handle_sync_event/4, handle_info/3,
          code_change/4, terminate/3]).
 
 -export([idle/2, ready/2, balancing_queues/2, pause/2]).
-
--import(rabbit_misc, [pget/2]).
 
 -include("rabbit_queue_master_balancer.hrl").
 
@@ -71,6 +69,9 @@ continue() ->
 info() ->
   gen_fsm:sync_send_all_state_event(?MODULE, '$info').
 
+report() ->
+  gen_fsm:sync_send_all_state_event(?MODULE, '$report').
+
 reset() ->
   gen_fsm:send_all_state_event(?MODULE, '$reset').
 
@@ -103,16 +104,19 @@ handle_sync_event('$load_queues', _From, _StateName, State) ->
   error_logger:info_msg("Queue Master Balancer loading ~p queues~n",
                         [Count = length(Queues)]),
   {reply, {ok, Count}, ?STATE_READY,
-                       State#state{queues = Queues,
-                                   phase  = ?STATE_READY}};
+                       State#state{queues    = Queues,
+                                   phase     = ?STATE_READY}};
 handle_sync_event('$info', _From, StateName, State) ->
   Reply = to_info(State),
-  {reply, Reply, StateName, State}. 
+  {reply, Reply, StateName, State};
+handle_sync_event('$report', _From, StateName, State) ->
+  Reply = make_report(),
+  {reply, {ok, Reply}, StateName, State}.
 
 handle_event('$reset', _StateName, State) ->
-  {next_state, ?STATE_IDLE, State#state{queues   = [],
-                                        balanced = [],
-                                        phase    = ?STATE_IDLE}};
+  {next_state, ?STATE_IDLE, State#state{queues    = [],
+                                        balanced  = [],
+                                        phase     = ?STATE_IDLE}};
 handle_event('$stop', _StateName, State) ->
   {next_state, ?STATE_IDLE, State#state{phase = ?STATE_IDLE}}.
 
@@ -158,7 +162,7 @@ balancing_queues('$balance_queues',
                 phase      = ?STATE_BALANCING_QUEUES,
                 balance_ts = ts()}};
 balancing_queues('$pause', State = #state{queues = Queues, balanced = B}) ->
-  error_logger:info_msg("Queue Master Balancer paused. ~p queues pending",
+  error_logger:info_msg("Queue Master Balancer paused. ~p queues pending "
                         "and ~p queues balanced", [length(Queues), length(B)]),
   {next_state, ?STATE_PAUSE, State#state{phase = ?STATE_PAUSE}};
 balancing_queues(_Event, State = #state{phase = ?STATE_BALANCING_QUEUES}) ->
@@ -209,29 +213,42 @@ balance_queue(Q, Priority, PTD, SynchTimeout) ->
 	   _:Reason -> {error, Reason}
 	end.
 
-%% Re-shuffle live queues only
-shuffle_queue({amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
+%% 3.6.0 <--> 3.6.5
+shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
 	Policy,_,_,live}, MinMaster, Priority, PTD, SynchTimeout) ->
-    execute_shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout);
-shuffle_queue({amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live,_}, MinMaster, Priority, PTD, SynchTimeout) ->
-    execute_shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout);
-shuffle_queue(_, _MinMaster, _Priority, _PTD, _SynchTimeout) -> ok.
+    shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
+      SynchTimeout, messages(Q));
+shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_},
+  _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+      {ok, QName};
 
-execute_shuffle(VHost, QN, Policy, MinMaster, QPid, SPids, Priority, PTD, SynchTimeout) ->
-  ok = rabbit_queue_master_balancer_sync:sync_mirrors(QPid),
+%% 3.6.6 <--> 3.6.x
+shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
+	Policy,_,_,live,_}, MinMaster, Priority, PTD, SynchTimeout) ->
+    shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
+      SynchTimeout, messages(Q));
+shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_,_},
+  _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+      {ok, QName};
+
+%% Unsupported version
+shuffle_queue(Q, _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+  throw({unsupported_version, Q}).
+
+shuffle(_, QN, _, _, _, _SPids = [], _, _, _, M) when M > 0 -> {ok, QN};
+shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout, _M) ->
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
+  ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
+  ok = policy_transition_delay(PTD),
   ok = rabbit_policy:set(VHost, QN, Pattern,
-  	     [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>, 
+         [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>, 
            [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>),
   ok = policy_transition_delay(PTD),
   ok = rabbit_policy:delete(VHost, QN),
   ok = policy_transition_delay(PTD),
   ok = reset_policy(Policy, PTD),
   ok = policy_transition_delay(PTD),
-  ok = rabbit_queue_master_balancer_sync:sync_mirrors(get_queue(VHost, QN)),
+  ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
   try
   	  rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SynchTimeout)
   catch
@@ -255,11 +272,28 @@ reset_policy(Policy, PTD) ->
   ok = policy_transition_delay(PTD),
   ok = rabbit_policy:set(VHost, Name, Pattern, Def, Priority, ApplyTo).
 
-fetch_queues()     -> rabbit_amqqueue:list().
+fetch_queues() -> rabbit_amqqueue:list().
+
+make_report() ->
+  QNs = lists:foldl(fun(Q, Acc) -> [get_queue_node(Q)|Acc] end, [], fetch_queues()),
+  [count(N, QNs, 0) || N <- rabbit_mnesia:cluster_nodes(running)].
+
+count(N, [], C)      -> {N, {queues, C}};
+count(N, [N|Rem], C) -> count(N, Rem, C+1);
+count(N, [_|Rem], C) -> count(N, Rem, C).
 
 get_queue(VHost, QN) ->
   {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, QN)),
   Q.
+
+get_queue_node(Q) ->
+  node(case Q of
+          {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
+            Pid;
+          {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live,_} ->
+            Pid;
+          Other -> error({unsupported_version, Other})
+       end).
 
 ts() ->
   {Mega, Sec, USec} = os:timestamp(),
@@ -276,3 +310,7 @@ get_policy_trans_delay() ->
   end.
 
 policy_transition_delay(PTD) -> timer:sleep(PTD).
+
+messages(Q) ->
+  [{messages, Messages}] = rabbit_amqqueue:info(Q, [messages]),
+    Messages.

@@ -2,7 +2,15 @@
 
 RabbitMQ Queue Master Balancer is a tool used for attaining queue master equilibrium across a RabbitMQ cluster installation. The plugin achieves this by computing queue master counts on nodes and engaging in shuffling procedures, with the ultimate goal of evenly distributing `queue masters` across RabbitMQ cluster nodes. Internally, the tool comprises of an FSM engine which transitions between different states of operation, to allow the procedures to be carried in a fully controllable manner.
 
-**NOTE:** This plugin is still experimental and yet to mature. We strictly recommend usage for RabbitMQ support operations only, at planned and scheduled time periods when the cluster nodes are under minimal, or most preferrably, zero traffic load.
+We define **Queue Equilibrium** as the state in which the following condition is/has been satisfied across all running cluster nodes:
+
+![inline fit](./priv/images/QueueMasterBalancerQueueEquilibrium.png)
+
+Points to consider prior usage:
+
+- This plugin will only apply to **mirrored queues (with or without messages)**, and **non-mirrored queues without messages**. For non-mirrored queues holding messages, we recommend users first setup an [HA policy](https://www.rabbitmq.com/ha.html) of choice, based on their cluster setup and needs, and then make use of this plugin.
+- The plugin considers **single, non-mirrored queues holding messages** a risk to migrate around cluster nodes, for example, in case of any network problems during migration procedures of such a queue, possibility of losing messages cannot be ignored. It therefore ignores such queues, up until users have setup an [HA policy](https://www.rabbitmq.com/ha.html) of choice and have slave queues running on the cluster for message redundancy. This is a safety precaution to protect users from any possibility of message loss during queue migration.
+- The plugin is young, and yet to mature. We strictly recommend usage for RabbitMQ support operations only, at planned and scheduled time periods when the cluster nodes are under minimal, or most preferably, zero traffic load.
 
 ## Design
 
@@ -23,7 +31,7 @@ In addition, regardless of its current state, the Queue Master Balancer plugin i
 
 ## Supported RabbitMQ Versions
 
-This plugin is compatible with RabbitMQ 3.6.x and beyond.
+This plugin is compatible with RabbitMQ 3.6.x and beyond, to the latest release.
 
 
 ## Installation
@@ -34,18 +42,22 @@ Download pre-compiled versions from [https://github.com/Ayanda-D/rabbitmq-queue-
 
 ### Build
 
-Clone and build the plugin by executing `make`. To create a package, execute `make dist` and find the `.ez` package file in the `plugins` directory.
+Clone and switch to branch `stable` of this plugin, then build the plugin by executing `make`. To create a package, execute `make dist` and find the `.ez` package file in the `plugins` directory.
+
+### Testing
+
+Likewise, clone and switch to branch `stable`, then execute `make tests` to test the plugin. View test results from the generated HTML files.
 
 ## Configuration
 
-The Queue Master Balancer may be configured in the `rabbitmq.config` file as follows:
+The Queue Master Balancer is configured in the `rabbitmq.config` file as follows:
 
 ```
 [{rabbitmq_queue_master_balancer,
-     [{operational_priority, 5},
-      {preload_queues,       false},
-      {sync_delay_timeout,   3000},
-      {inter_policy_delay,   50}]
+     [{operational_priority,      5},
+      {preload_queues,            false},
+      {sync_delay_timeout,        3000},
+      {policy_transition_delay,   50}]
  }].
 
 ```
@@ -57,8 +69,8 @@ The following table summarizes the meaning of these configuration parameters.
 |---|---|---|---|
 | operational\_priority  | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |  
 | preload\_queues | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
-| sync\_delay_timeout | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before the balancing procedure is completed  | Integer | 3000 |
-| inter\_policy_delay | Time period (in milliseconds) the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue | Integer | 50  |
+| sync\_delay_timeout | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before balancing procedure is marked complete  | Integer | 3000 |
+| policy\_transition_delay | Time period (in milliseconds) the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue | Integer | 50  |
 
 
 ## Operation
@@ -113,19 +125,53 @@ In context of the plugin, stopping is similar to `reset`, in that it is set back
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:stop().'`
 
-### 9. Disable plugin
+### 9. Report
+
+To acquire a report illustrating the distribution of queues across the cluster (at any moment in time), the following command may be used:
+
+`rabbitmqctl eval 'rabbit_queue_master_balancer:report().'`
+
+### 10. Disable plugin
 
 The plugin is disabled as follows:
 
 `rabbitmq-plugins disable rabbitmq_queue_master_balancer`
+
 
 ## Additional information
 
 The following aspects must be put into consideration when putting it to use:
 
  - Queue balancing is a delicate operation which **must** be carried out in a very controlled manner and environment not prone to network partitions. Ensure your network is in a stable condition prior to executing queue balancing procedures.
- - Configuration parameters such as `inter_policy_delay` need to be bumped up as aspects such as cluster size, queue slave count and message size increase.
+ - Configuration parameters such as `policy_transition_delay` need to be bumped up as aspects such as cluster size, queue slave count and message size increase.
  - The distribution of Queues within a cluster is non-deterministic and a single execution round of the Queue Master Balancer may not be enough to attain immediate equilibria. The plugin may (or may not) need multiple execution rounds before satisfactory queue equilibrium is attained.
+
+## Example Usage
+
+This [link illustrates](https://gist.github.com/Ayanda-D/ddd5fcb5d87c8761fbf2c663fdd07ce6) the plugin in full use. An **unbalanced 3-node** cluster exists, consisting of 21 queues, in which all queue masters reside on a single node: `'rabbit@Ayandas-MacBook-Pro'`. The Queue Master Balancer is then executed, and queried for its status information during the process until balancing procedures have completed. To illustrate its results, we generate queue distribution report of the cluster prior balancing the queues, and another after the balancing procedures have completed. The results summary are as follows:
+
+- Report **before** Queue Master Balancer is executed:
+
+```
+Ayandas-MacBook-Pro:sbin ayandadube$ ./rabbitmqctl eval 'rabbit_queue_master_balancer:report().'
+{ok,[{'rabbit_2@Ayandas-MacBook-Pro',{queues,0}},
+     {'rabbit@Ayandas-MacBook-Pro',{queues,21}},
+     {'rabbit_1@Ayandas-MacBook-Pro',{queues,0}}]}
+```
+
+- Report **after** Queue Master Balancer is executed:
+
+```
+Ayandas-MacBook-Pro:sbin ayandadube$ ./rabbitmqctl eval 'rabbit_queue_master_balancer:report().'
+{ok,[{'rabbit_2@Ayandas-MacBook-Pro',{queues,7}},
+     {'rabbit@Ayandas-MacBook-Pro',{queues,6}},
+     {'rabbit_1@Ayandas-MacBook-Pro',{queues,8}}]}
+```
+The resulting distribution of queues across the cluster is near even, a state in which we have attained an acceptable level of queue equilibrium. Computing Queue Equilibrium for the node with the least number of queues, `'rabbit@Ayandas-MacBook-Pro'`, with 6 queues, yields the following percentage:
+
+![inline fit](./priv/images/QueueMasterBalancerQueueEquilibriumResult.png)
+
+which is satisfies condition/equation [i], being **>= 70%**.
 
 ## License and Copyright
 
