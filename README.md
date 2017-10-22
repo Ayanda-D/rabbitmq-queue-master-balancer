@@ -171,7 +171,7 @@ The resulting distribution of queues across the cluster is near even, a state in
 
 ![inline fit](./priv/images/QueueMasterBalancerQueueEquilibriumResult.png)
 
-which is satisfies condition/equation [i], being **>= 70%**.
+which satisfies condition/equation [i], being **>= 70%**.
 
 ## License and Copyright
 
