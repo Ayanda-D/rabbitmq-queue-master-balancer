@@ -307,6 +307,8 @@ get_queue_nodes1() ->
           {amqqueue, {resource,?VHOST,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
             Pid;
           {amqqueue, {resource,?VHOST,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live,_} ->
+            Pid;
+          {amqqueue, {resource,?VHOST,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,_,live,_,_,_,_} ->
             Pid
         end) || Q <- rabbit_amqqueue:list()].
 
@@ -317,6 +319,8 @@ get_queue_names_and_nodes(Config) ->
         {amqqueue, {resource,?VHOST,queue,QN},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
           {QN, Pid};
         {amqqueue, {resource,?VHOST,queue,QN},_,_,_,_,Pid,_,_,_,_,_,_,live,_} ->
+          {QN, Pid};
+        {amqqueue, {resource,?VHOST,queue,QN},_,_,_,_,Pid,_,_,_,_,_,_,_,live,_,_,_,_} ->
           {QN, Pid}
       end,
     {QN0, node(Pid0)}

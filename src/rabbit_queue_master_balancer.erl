@@ -28,12 +28,16 @@
 -include("rabbit_queue_master_balancer.hrl").
 
 % ------------------------------------------------------------
+-type report_entry() :: {node(), {'queues', integer()}}.
+-type report()       :: {ok, [report_entry()]}.
+
 -spec start_link()  -> rabbit_types:ok_pid_or_error().
 -spec load_queues() -> 'ok'.
 -spec go()          -> 'ok'.
 -spec pause()       -> 'ok'.
 -spec continue()    -> 'ok'.
 -spec info()        -> 'ok'.
+-spec report()      -> report().
 -spec reset()       -> 'ok'.
 -spec stop()        -> 'ok'.
 -spec shutdown()    -> 'ok'.
@@ -43,7 +47,7 @@
                 phase,
                 queues       = [],
                 balanced     = [],
-                op_priority,  
+                op_priority,
                 sync_timeout,
                 policy_trans_delay,
                 balance_ts}).
@@ -204,49 +208,60 @@ to_info(#state{parent_pid         = PPid,
    {last_balance_timestamp,  TS}].
 
 balance_queue(Q, Priority, PTD, SynchTimeout) ->
-	%% Aqcuire Min-master
-	{ok, MinMaster} =
+    %% Aqcuire Min-master
+    {ok, MinMaster} =
 	  rabbit_queue_location_min_masters:queue_master_location(Q),
-	try
-	   {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, SynchTimeout)
+    try
+       User      = get_acting_user(Q),
+       {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, SynchTimeout, User)
 	catch
 	   _:Reason -> {error, Reason}
 	end.
 
 %% 3.6.0 <--> 3.6.5
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live}, MinMaster, Priority, PTD, SynchTimeout) ->
+	Policy,_,_,live}, MinMaster, Priority, PTD, SynchTimeout, User) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout, messages(Q));
+      SynchTimeout, User, messages(Q));
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+  _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
       {ok, QName};
 
 %% 3.6.6 <--> 3.6.x
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live,_}, MinMaster, Priority, PTD, SynchTimeout) ->
+	Policy,_,_,live,_}, MinMaster, Priority, PTD, SynchTimeout, User) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout, messages(Q));
+      SynchTimeout, User, messages(Q));
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+  _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
+      {ok, QName};
+
+%% 3.7.0 --> ...
+shuffle_queue(Q = {amqqueue,{resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
+  Policy,_,_,_,live,_,_,_,_}, MinMaster, Priority, PTD, SynchTimeout, User) ->
+    shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
+      SynchTimeout, User, messages(Q));
+shuffle_queue({amqqueue,{resource, _VHost, queue, QName},_,_,_,_,_,_,_,_,_,_,_,
+  _,_,_,_,_,_}, _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
       {ok, QName};
 
 %% Unsupported version
-shuffle_queue(Q, _MinMaster, _Priority, _PTD, _SynchTimeout) ->
+shuffle_queue(Q, _MinMaster, _Priority, _PTD, _SynchTimeout, _VSNComp) ->
   throw({unsupported_version, Q}).
 
-shuffle(_, QN, _, _, _, _SPids = [], _, _, _, M) when M > 0 -> {ok, QN};
-shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout, _M) ->
+shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _User, M) when M > 0 ->
+{ok, QN};
+shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout,
+    User, _M) ->
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
   ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
   ok = policy_transition_delay(PTD),
-  ok = rabbit_policy:set(VHost, QN, Pattern,
-         [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>, 
-           [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>),
+  ok = set_policy(VHost, QN, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
+         [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>, User),
   ok = policy_transition_delay(PTD),
-  ok = rabbit_policy:delete(VHost, QN),
+  ok = delete_policy(VHost, QN, User),
   ok = policy_transition_delay(PTD),
-  ok = reset_policy(Policy, PTD),
+  ok = reset_policy(Policy, PTD, User),
   ok = policy_transition_delay(PTD),
   ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
   try
@@ -259,18 +274,25 @@ shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout,
   end,
   {ok, QN}.
 
-reset_policy(undefined, _PTD) -> ok;
-reset_policy(Policy, PTD) ->
-  error_logger:info_msg("Queue Master Balancer resetting policy ~p", [Policy]),
+set_policy(VHost, QN, Pattern, Spec, Priority, ApplyTo, undefined) ->
+  rabbit_policy:set(VHost, QN, Pattern, Spec, Priority, ApplyTo);
+set_policy(VHost, QN, Pattern, Spec, Priority, ApplyTo, User) ->
+  rabbit_policy:set(VHost, QN, Pattern, Spec, Priority, ApplyTo, User).
+
+reset_policy(undefined, _PTD, _User) -> ok;
+reset_policy(Policy, PTD, User) ->
   VHost    = rabbit_misc:pget(vhost, Policy),
   Name     = rabbit_misc:pget(name, Policy),
   Pattern  = rabbit_misc:pget(pattern, Policy),
   Def      = rabbit_misc:pget(definition, Policy),
   Priority = rabbit_misc:pget(priority, Policy),
   ApplyTo  = rabbit_misc:pget('apply-to', Policy),
-  ok = rabbit_policy:delete(VHost, Name),
+  ok = delete_policy(VHost, Name, User),
   ok = policy_transition_delay(PTD),
-  ok = rabbit_policy:set(VHost, Name, Pattern, Def, Priority, ApplyTo).
+  ok = set_policy(VHost, Name, Pattern, Def, Priority, ApplyTo, User).
+
+delete_policy(VHost, QN, undefined) -> rabbit_policy:delete(VHost, QN);
+delete_policy(VHost, QN, User)      -> rabbit_policy:delete(VHost, QN, User).
 
 fetch_queues() -> rabbit_amqqueue:list().
 
@@ -291,6 +313,8 @@ get_queue_node(Q) ->
           {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
             Pid;
           {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live,_} ->
+            Pid;
+          {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,_,live,_,_,_,_} ->
             Pid;
           Other -> error({unsupported_version, Other})
        end).
@@ -314,3 +338,12 @@ policy_transition_delay(PTD) -> timer:sleep(PTD).
 messages(Q) ->
   [{messages, Messages}] = rabbit_amqqueue:info(Q, [messages]),
     Messages.
+
+get_acting_user(Q) ->
+  case rabbit_misc:version_compare(rabbit_misc:version(), "3.7.0") of
+    lt -> undefined;
+    _  ->
+      {amqqueue,{resource, _VHost, queue, _QN},_,_,_,_,_,_,_,_,_,_,_,_,live,
+      _,_,_, User} = Q,
+      User
+  end.
