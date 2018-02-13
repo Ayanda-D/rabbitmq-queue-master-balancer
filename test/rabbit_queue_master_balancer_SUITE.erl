@@ -131,6 +131,7 @@ successful_run(Config, N, [A, B, C], Delay) ->
 
   %% Idle: Info0
   Info0 = info(Config, A),
+  Status0 = status(Config, A),
   ?STATE_IDLE = pget(phase, Info0),
 
   QNodes = [FN|_] = get_queue_nodes(Config),
@@ -140,10 +141,12 @@ successful_run(Config, N, [A, B, C], Delay) ->
   %% Load Queues: Info1
   {ok, N} = load_queues(Config, A),
   Info1   = info(Config, A),
+  Status1 = status(Config, A),
 
   %% Balance Queues: Info2
   ok    = balance_queues(Config, A),
   Info2 = info(Config, A),
+  Status2 = status(Config, A),
 
   %% Balance Pause: Info3
   ok    = pause(Config, A),
@@ -166,52 +169,76 @@ successful_run(Config, N, [A, B, C], Delay) ->
   %% Reset: Info7
   ok    = reset(Config, A),
   Info7 = info(Config, A),
+  Status7 = status(Config, A),
 
   %% Verify Idle Info0
   ?STATE_IDLE = pget(phase, Info0),
-  false = (length(pget(queues,   Info0)) > 0), 
-  false = (length(pget(balanced, Info0)) > 0), 
+  true  = (pget(total,    Info0) == 0),
+  true  = (pget(position, Info0) == undefined),
+  false = (pget(balanced, Info0) >  0),
 
   %% Verify Load Queues Info1
   ?STATE_READY = pget(phase, Info1),
-  true = (length(pget(queues,   Info1)) == N), 
-  false= (length(pget(balanced, Info1)) >  0), 
+  true = (pget(total,    Info1) == N),
+  true = (pget(position, Info1) >= 0),
+  false= (pget(balanced, Info1) >  0),
 
   %% Verify Info2
   ?STATE_BALANCING_QUEUES = pget(phase, Info2),
-  true = (length(pget(queues,   Info2)) > 0), 
-  true = (length(pget(balanced, Info2)) > 0), 
+  true = (pget(total,    Info2) == N),
+  true = (pget(position, Info2) >= 0),
+  true = (pget(balanced, Info2) >  0),
 
   %% Verify Info3
   ?STATE_PAUSE = pget(phase, Info3),
-  true = (length(pget(queues,   Info3)) > 0), 
-  true = (length(pget(balanced, Info3)) > 0), 
+  true = (pget(total,    Info3) == N),
+  true = (pget(position, Info3) >= 0),
+  true = (pget(balanced, Info3) >  0),
 
   %% Verify Info4
   ?STATE_BALANCING_QUEUES = pget(phase, Info4),
-  true = (length(pget(queues,   Info4)) > 0), 
-  true = (length(pget(balanced, Info4)) > 0), 
+  true = (pget(total,    Info4) == N),
+  true = (pget(position, Info4) >= 0),
+  true = (pget(balanced, Info4) >  0),
 
   %% Verify Balancing Complete: Info5
   ?STATE_IDLE = pget(phase, Info5),
-  true = (length(pget(queues,   Info5)) ==0), 
-  true = (length(pget(balanced, Info5)) ==N), 
+  true = (pget(total,    Info5) == N),
+  true = (pget(position, Info5) >= 0),
+  true = (pget(balanced, Info5) == N),
 
   %% Verify Stop: Info6
   ?STATE_IDLE = pget(phase, Info6),
-  true = (length(pget(queues,   Info6)) ==0), 
-  true = (length(pget(balanced, Info6)) ==N),
+  true = (pget(total,    Info6) == N),
+  true = (pget(position, Info6) == undefined),
+  true = (pget(balanced, Info6) == N),
 
   %% Verify Reset: Info7
   ?STATE_IDLE = pget(phase, Info7),
-  true = (length(pget(queues,   Info7)) ==0), 
-  true = (length(pget(balanced, Info7)) ==0),
+  true = (pget(total,    Info7) == N),
+  true = (pget(position, Info7) == undefined),
+  true = (pget(balanced, Info7) == 0),
+
+  true = (ets:info(rabbit_queue_master_balancer, size) == undefined),
+
+  %% Verify Status
+  Pid  = pget(process_id, Status0),
+  true = is_pid_alive(Config, Pid),
+  true = (pget(process_id, Status1) == Pid),
+  true = (pget(process_id, Status2) == Pid),
+  true = (pget(process_id, Status7) == Pid),
+  true = (pget(queues_pending_balance, Status0) == 0),
+  true = (pget(queues_pending_balance, Status1) == N),
+  true = (pget(queues_pending_balance, Status2) >  0),
+  true = (pget(queues_pending_balance, Status7) == 0),
+  true = (pget(memory_utilization,     Status7) >  0),
 
   %% We Qualify Queue Equilibrium as follows;
   %% => at least 2 queues per node passes from
   %%    a total of 7 qualifies the cluster as
   %%    having attained balance/equilibrium...
   {ok, Report} = report(Config, A),
+
   {queues, AQs} = pget(A, Report),
   {queues, BQs} = pget(B, Report),
   {queues, CQs} = pget(C, Report),
@@ -314,7 +341,7 @@ get_queue_nodes1() ->
 
 get_queue_names_and_nodes(Config) ->
   [begin
-    {QN0, Pid0} = 
+    {QN0, Pid0} =
       case Q of
         {amqqueue, {resource,?VHOST,queue,QN},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
           {QN, Pid};
@@ -334,9 +361,12 @@ init_queue_master_balancer_remote() ->
   application:set_env(rabbitmq_queue_master_balancer, operational_priority, 15),
   application:set_env(rabbitmq_queue_master_balancer, preload_queues, false),
   application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, 100),
-  application:set_env(rabbitmq_queue_master_balancer, policy_transition_delay, 10),
+  application:set_env(rabbitmq_queue_master_balancer, policy_transition_delay, 100),
 
   ok = application:start(rabbitmq_queue_master_balancer).
+
+is_pid_alive(Config, Pid) ->
+  rabbit_ct_broker_helpers:rpc(Config, node(Pid), erlang, is_process_alive, [Pid]).
 
 get_node_names(Config, ClusterSize) ->
   [rabbit_ct_broker_helpers:rpc(Config, Node-1,
@@ -351,6 +381,9 @@ occurance(N, [_|Rem], C) -> occurance(N, Rem, C).
 
 info(Config, N) ->
   fire_fsm_event(Config, N, info).
+
+status(Config, N) ->
+  fire_fsm_event(Config, N, status).
 
 report(Config, N) ->
   fire_fsm_event(Config, N, report).

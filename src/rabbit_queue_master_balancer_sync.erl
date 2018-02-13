@@ -37,17 +37,17 @@ verify_sync(VHost, QN, SPids) ->
 verify_sync(VHost, QN, SPids, Timeout) ->
   SynchPPid = self(),
   SynchRef  = make_ref(),
-  Syncher   = spawn_link(fun() ->
-                           verify_sync(VHost, SynchPPid, SynchRef, QN, SPids)
-                         end),
+  Syncher   = spawn(fun() ->
+                        verify_sync(VHost, SynchPPid, SynchRef, QN, SPids)
+                    end),
   receive
     {Syncher, _SyncherRef, done} -> ok;
-    {'EXIT',  _Syncher, Reason}  -> throw(Reason)
+    {'EXIT',  _Syncher, Reason}  -> throw({sync_termination, Reason})
   after Timeout ->
     exit(Syncher, {timeout, ?MODULE})
   end.
 
-verify_sync(VHost, SynchPPid, SynchRef, QN, SPids) -> 
+verify_sync(VHost, SynchPPid, SynchRef, QN, SPids) ->
   SSPs = length(synchronised_slave_pids(VHost, QN)),
   if SSPs =:= length(SPids) -> SynchPPid ! {self(), SynchRef, done};
      true -> verify_sync(VHost, SynchPPid, SynchRef, QN, SPids)

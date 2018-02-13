@@ -22,7 +22,7 @@ As illustrated, the plugin is at any time in it's operation in one of 4 states, 
 
 - **IDLE:** In this state, the plugin is at rest and carries out no actions while awaiting to be triggered into READY or BALANCING QUEUES states depending on the received event, which are `$load_queues` or `$balance_queues` event.
 - **READY:** The plugin engages the READY state whenever it is loaded with queues. The `$load_queues` event will cause the plugin to acquire all queues in preparation for balancing them out in the cluster, thus entering the READY state.
-- **BALANCING QUEUES:** This is the state in which the plugin is "working", i.e. moving queues around the cluster to achieve queue equilibrium. The `$balance_queues` event will bring the plugin into this state, depending on its previous state. 
+- **BALANCING QUEUES:** This is the state in which the plugin is "working", i.e. moving queues around the cluster to achieve queue equilibrium. The `$balance_queues` event will bring the plugin into this state, depending on its previous state.
 - **PAUSE:** While in BALANCING QUEUES state, the plugin may be paused by triggering the `$pause` event. Once in PAUSE state, the plugin retains the current pending queues still to be balanced, and awaits reception of `$continue` event to proceed in balancing them out. This `$continue` event takes the plugin's state back to BALANCING QUEUES.
 
 In addition, regardless of its current state, the Queue Master Balancer plugin is always receptive to `$load_queues`, `$stop` and `$reset` events. Details on events and their execution are discussed in **Operation** section.
@@ -65,7 +65,7 @@ The Queue Master Balancer is configured in the `rabbitmq.config` file as follows
 The following table summarizes the meaning of these configuration parameters.
 
 
-| PARAMETER NAME  | DESCRIPTION  | TYPE  |  DEFAULT | 
+| PARAMETER NAME  | DESCRIPTION  | TYPE  |  DEFAULT |
 |---|---|---|---|
 | operational\_priority  | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |  
 | preload\_queues | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
@@ -78,60 +78,66 @@ The following table summarizes the meaning of these configuration parameters.
 For RabbitMQ versions 3.6.x, the plugin is operated and executed using the traditional and classic `rabbitmq-plugins` and `rabbitmqctl eval` command line interfaces. Supported operations are as follows:
 
 ### 1. Enable plugin
- 
+
 The plugin is enabled like any other standard [RabbitMQ plugin](https://www.rabbitmq.com/plugins.html).
- 
+
 `rabbitmq-plugins enable rabbitmq_queue_master_balancer`
 
 ### 2. Get plugin information
- 
+
 The plugin may be queried for it's current state information at any point of it's operation. This is carried out by executing the `info` call:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:info().'`
 
-### 3. Load queues
+### 3. Get plugin status
 
-Once enabled, the plugin must be loaded with queues which it's going to balance across the cluster. If the `preload_queues` configuration parameter is set to `true` in the `rabbitmq.config` file, this procedure may not be necessary. However, queues may still be loaded as follows regardless of the plugin's configuration: 
- 
+The plugin may be queried for it's status information at any point during it's execution run. Unlike the `info` query, the `status` query is independent of the FSM engine's operational procedures, and gives a short summary of the engine's Process Identifier, Queues Pending Balance and Memory Utilization. The `status` call is executed as follows:
+
+`rabbitmqctl eval 'rabbit_queue_master_balancer:status().'`
+
+### 4. Load queues
+
+Once enabled, the plugin must be loaded with queues which it's going to balance across the cluster. If the `preload_queues` configuration parameter is set to `true` in the `rabbitmq.config` file, this procedure may not be necessary. However, queues may still be loaded as follows regardless of the plugin's configuration:
+
 `rabbitmqctl eval 'rabbit_queue_master_balancer:load_queues().'`
 
-### 4. Balance loaded queues 
+### 5. Balance loaded queues
 
 Once queues have been loaded, the balancing procedures may then be executed by issuing the `go` command as follows:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:go().'`
 
-### 5. Pause balancing
+### 6. Pause balancing
 
 While queues are undergoing balancing, the plugin may be `paused`, at which point it switches into its PAUSE state, retaining the queues pending balance up until that point in time. The following command is executed to trigger the plugin's PAUSE state:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:pause().'`
 
-### 6. Continue balancing
+### 7. Continue balancing
 
 To proceed back into BALANCING QUEUES from the PAUSE state, the `continue` command is executed as follows:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:continue().'`
 
-### 7. Reset plugin
+### 8. Reset plugin
 
 The plugin may be reset at any point in time, setting it back to its IDLE state and in the following manner.
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:reset().`
 
-### 8. Stop plugin
+### 9. Stop plugin
 
 In context of the plugin, stopping is similar to `reset`, in that it is set back to IDLE. The different being the state variables are maintained, and the plugin may still be queried for its last information:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:stop().'`
 
-### 9. Report
+### 10. Report
 
 To acquire a report illustrating the distribution of queues across the cluster (at any moment in time), the following command may be used:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:report().'`
 
-### 10. Disable plugin
+### 11. Disable plugin
 
 The plugin is disabled as follows:
 
