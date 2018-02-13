@@ -17,8 +17,8 @@
 -module(rabbit_queue_master_balancer).
 -behaviour(gen_fsm).
 
--export([start_link/0, load_queues/0, go/0, pause/0, continue/0,
-         info/0, reset/0, report/0, stop/0, shutdown/0]).
+-export([start_link/0, load_queues/0, load_queues/1, go/0, pause/0, continue/0,
+         info/0, info/1, reset/0, status/0, report/0, report/1, stop/0, shutdown/0]).
 
 -export([init/1, handle_event/3, handle_sync_event/4, handle_info/3,
          code_change/4, terminate/3]).
@@ -30,6 +30,7 @@
 % ------------------------------------------------------------
 -type report_entry() :: {node(), {'queues', integer()}}.
 -type report()       :: {ok, [report_entry()]}.
+-type status()       :: [{atom(), term()}].
 
 -spec start_link()  -> rabbit_types:ok_pid_or_error().
 -spec load_queues() -> 'ok'.
@@ -37,6 +38,7 @@
 -spec pause()       -> 'ok'.
 -spec continue()    -> 'ok'.
 -spec info()        -> 'ok'.
+-spec status()      -> status().
 -spec report()      -> report().
 -spec reset()       -> 'ok'.
 -spec stop()        -> 'ok'.
@@ -45,12 +47,19 @@
 
 -record(state, {parent_pid,
                 phase,
-                queues       = [],
-                balanced     = [],
+                position     = 0,
+                prev         = undefined,
+                size_t       = 0,
+                balanced     = 0,
                 op_priority,
                 sync_timeout,
                 policy_trans_delay,
                 balance_ts}).
+
+-define(TAB,       ?MODULE).
+-define(SIZE,      ets:info(?TAB, size)).
+-define(FIRST,     ets:first(?TAB)).
+-define(DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT,  5000).
 
 %% --------
 %% FSM API
@@ -59,7 +68,10 @@ start_link() ->
   gen_fsm:start_link({local, ?MODULE}, ?MODULE, [self()], []).
 
 load_queues() ->
-  gen_fsm:sync_send_all_state_event(?MODULE, '$load_queues').
+  load_queues(?DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT).
+
+load_queues(Timeout) ->
+  gen_fsm:sync_send_all_state_event(?MODULE, '$load_queues', Timeout).
 
 go() ->
   gen_fsm:send_event(?MODULE, '$balance_queues').
@@ -71,10 +83,16 @@ continue() ->
   gen_fsm:send_event(?MODULE, '$continue').
 
 info() ->
-  gen_fsm:sync_send_all_state_event(?MODULE, '$info').
+  info(?DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT).
+
+info(Timeout) ->
+  gen_fsm:sync_send_all_state_event(?MODULE, '$info', Timeout).
 
 report() ->
-  gen_fsm:sync_send_all_state_event(?MODULE, '$report').
+  report(?DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT).
+
+report(Timeout) ->
+  gen_fsm:sync_send_all_state_event(?MODULE, '$report', Timeout).
 
 reset() ->
   gen_fsm:send_all_state_event(?MODULE, '$reset').
@@ -85,30 +103,37 @@ stop() ->
 shutdown() ->
   gen_fsm:stop(?MODULE).
 
+%% -------------------
+%% FSM independant API
+%% -------------------
+status() -> fetch_current_status().
+
 %% -------------------------
 %% FSM (Mandatory) CallBacks
 %% -------------------------
 init([Parent]) ->
   process_flag(trap_exit, true),
-  InitQueues   = init_queues(),
-  OpPriority   = rabbit_misc:get_env(?MODULE, operational_priority,
-  	               ?DEFAULT_OPERATIONAL_PRIORITY),
-  SynchTimeout = rabbit_misc:get_env(?MODULE, sync_delay_timeout,
-  	               ?DEFAULT_SYNC_DELAY_TIMEOUT),
+  ?MODULE      = ets:new(?MODULE, [named_table, set, private]),
+  ok           = init_queues(),
+  OpPriority   = get_config(operational_priority, ?DEFAULT_OPERATIONAL_PRIORITY),
+  SynchTimeout = get_config(sync_delay_timeout, ?DEFAULT_SYNC_DELAY_TIMEOUT),
   PTD          = get_policy_trans_delay(),
   {ok, ?STATE_IDLE, #state{parent_pid         = Parent,
                            phase              = ?STATE_IDLE,
-                           queues             = InitQueues,
+                           position           = ?FIRST,
                            op_priority        = OpPriority,
                            sync_timeout       = SynchTimeout,
                            policy_trans_delay = PTD}}.
 
-handle_sync_event('$load_queues', _From, _StateName, State) ->
-  Queues = fetch_queues(),
+handle_sync_event('$load_queues', _From, _StateName, State = #state{}) ->
+  ok = insert_queues(),
   error_logger:info_msg("Queue Master Balancer loading ~p queues~n",
-                        [Count = length(Queues)]),
+                        [Count = ?SIZE]),
   {reply, {ok, Count}, ?STATE_READY,
-                       State#state{queues    = Queues,
+                       State#state{position  = ?FIRST,
+                                   size_t    = ?SIZE,
+                                   prev      = undefined,
+                                   balanced  = 0,
                                    phase     = ?STATE_READY}};
 handle_sync_event('$info', _From, StateName, State) ->
   Reply = to_info(State),
@@ -118,8 +143,10 @@ handle_sync_event('$report', _From, StateName, State) ->
   {reply, {ok, Reply}, StateName, State}.
 
 handle_event('$reset', _StateName, State) ->
-  {next_state, ?STATE_IDLE, State#state{queues    = [],
-                                        balanced  = [],
+  ets:delete_all_objects(?TAB),
+  {next_state, ?STATE_IDLE, State#state{position  = ?FIRST,
+                                        prev      = undefined,
+                                        balanced  = 0,
                                         phase     = ?STATE_IDLE}};
 handle_event('$stop', _StateName, State) ->
   {next_state, ?STATE_IDLE, State#state{phase = ?STATE_IDLE}}.
@@ -136,45 +163,61 @@ terminate(_Reason, _StateName, _State) ->
 %% ----------
 %% FSM States
 %% ----------
-idle('$balance_queues', State = #state{queues = Queues}) ->
+idle('$balance_queues', State = #state{}) ->
   error_logger:info_msg("Queue Master Balancer balancing ~p queues~n",
-                        [length(Queues)]),
+                        [?SIZE]),
   gen_fsm:send_event(?MODULE, '$balance_queues'),
-  {next_state, ?STATE_BALANCING_QUEUES, State#state{phase=?STATE_BALANCING_QUEUES}};
+  {next_state, ?STATE_BALANCING_QUEUES, State#state{size_t = ?SIZE,
+                                                    phase  = ?STATE_BALANCING_QUEUES}};
 idle(_Event, State = #state{phase = ?STATE_IDLE}) ->
   {next_state, ?STATE_IDLE, State}.
 
 ready('$balance_queues', State) ->
   gen_fsm:send_event(?MODULE, '$balance_queues'),
-  {next_state, ?STATE_BALANCING_QUEUES, State#state{phase=?STATE_BALANCING_QUEUES}};
+  {next_state, ?STATE_BALANCING_QUEUES, State#state{size_t = ?SIZE,
+                                                    phase  = ?STATE_BALANCING_QUEUES}};
 ready(_Event, State = #state{phase = ?STATE_READY}) ->
   {next_state, ?STATE_READY, State}.
 
-balancing_queues('$balance_queues', State = #state{queues = []}) ->
-  {next_state, ?STATE_IDLE, State#state{phase = ?STATE_IDLE}};
+balancing_queues('$balance_queues', State = #state{balanced = Balanced,
+                                                   prev     = Prev,
+                                                   position = '$end_of_table'}) ->
+  maybe_drop(Prev),
+  error_logger:info_msg("Queue Master Balancer completed balancing ~p queues",
+                        [Balanced]),
+  {next_state, ?STATE_IDLE, State#state{prev = undefined, phase = ?STATE_IDLE}};
 balancing_queues('$balance_queues',
-	               State = #state{queues             = [Q|Queues],
-	                              op_priority        =  OpPriority,
-	                              balanced           =  Balanced,
-	                              sync_timeout       =  SynchTimeout,
-	                              policy_trans_delay =  PTD}) ->
-  {ok, QName} = balance_queue(Q, OpPriority, PTD, SynchTimeout),
+                   State = #state{position           =  Pos,
+                                  prev               =  Prev,
+                                  balanced           =  Balanced,
+                                  op_priority        =  OpPriority,
+                                  sync_timeout       =  SynchTimeout,
+                                  policy_trans_delay =  PTD}) ->
+  case ets:lookup(?TAB, Pos) of
+    [{Pos, {QName, VHost}}] ->
+        {ok, QName} =
+            balance_queue(get_queue(VHost, QName), OpPriority, PTD, SynchTimeout),
+            maybe_drop(Prev);
+    _ ->
+        void
+  end,
   gen_fsm:send_event(?MODULE, '$balance_queues'),
   {next_state, ?STATE_BALANCING_QUEUES,
-    State#state{queues     = Queues,
-                balanced   = sets:to_list(sets:from_list([QName|Balanced])),
-                phase      = ?STATE_BALANCING_QUEUES,
-                balance_ts = ts()}};
-balancing_queues('$pause', State = #state{queues = Queues, balanced = B}) ->
+      State#state{position   = ets:next(?TAB, Pos),
+                  prev       = Pos,
+                  balanced   = Balanced + 1,
+                  phase      = ?STATE_BALANCING_QUEUES,
+                  balance_ts = ts()}};
+balancing_queues('$pause', State = #state{size_t = OSize, balanced = B}) ->
   error_logger:info_msg("Queue Master Balancer paused. ~p queues pending "
-                        "and ~p queues balanced", [length(Queues), length(B)]),
+                        "and ~p queues balanced", [OSize - B, B]),
   {next_state, ?STATE_PAUSE, State#state{phase = ?STATE_PAUSE}};
 balancing_queues(_Event, State = #state{phase = ?STATE_BALANCING_QUEUES}) ->
   {next_state, ?STATE_BALANCING_QUEUES, State}.
 
-pause('$continue', State = #state{queues = Queues}) ->
+pause('$continue', State = #state{size_t = OSize, balanced = B}) ->
   error_logger:info_msg("Queue Master Balancer continuing: "
-                        "~p pending queues~n", [length(Queues)]),
+                        "~p pending queues~n", [OSize - B]),
   gen_fsm:send_event(?MODULE, '$balance_queues'),
   {next_state, ?STATE_BALANCING_QUEUES,
     State#state{phase = ?STATE_BALANCING_QUEUES}};
@@ -185,23 +228,32 @@ pause(_Event, State = #state{phase = ?STATE_PAUSE}) ->
 % Internal
 % --------
 init_queues() ->
-  PreloadQueues = rabbit_misc:get_env(?MODULE, preload_queues, false),
-  if PreloadQueues -> fetch_queues();
-  	true -> []
+  PreloadQueues = get_config(preload_queues, false),
+  if PreloadQueues -> insert_queues();
+    true           -> ok
   end.
+
+insert_queues() ->
+    lists:foldl(fun(Entry = {_Q, _V}, Acc) ->
+                    true = ets:insert(?TAB, {Acc, Entry}),
+                    Acc + 1
+                end, 0, fetch_queue_ids()),
+    ok.
 
 to_info(#state{parent_pid         = PPid,
                phase              = Phase,
-               queues             = Queues,
-               balanced           = BalancedQueues,
+               position           = Pos,
+               size_t             = Size,
+               balanced           = Balanced,
                op_priority        = Priority,
                sync_timeout       = SynchTimeout,
                policy_trans_delay = PTD,
                balance_ts         = TS}) ->
   [{parent_pid,              PPid},
    {phase,                   Phase},
-   {queues,                  Queues},
-   {balanced,                BalancedQueues},
+   {total,                   Size},
+   {position,                to_pos(Pos)},
+   {balanced,                Balanced},
    {operational_priority,    Priority},
    {sync_timeout,            SynchTimeout},
    {policy_transition_delay, PTD},
@@ -210,13 +262,13 @@ to_info(#state{parent_pid         = PPid,
 balance_queue(Q, Priority, PTD, SynchTimeout) ->
     %% Aqcuire Min-master
     {ok, MinMaster} =
-	  rabbit_queue_location_min_masters:queue_master_location(Q),
+       rabbit_queue_location_min_masters:queue_master_location(Q),
     try
        User      = get_acting_user(Q),
        {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, SynchTimeout, User)
-	catch
-	   _:Reason -> {error, Reason}
-	end.
+    catch
+       _:Reason -> {error, Reason}
+    end.
 
 %% 3.6.0 <--> 3.6.5
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
@@ -268,8 +320,8 @@ shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout,
   	  rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SynchTimeout)
   catch
   	_:Reason ->
-  	  error_logger:error_msg("Queue Master Balancer synchronisation error."
-                             "~nQueue: ~p~nReason: ~p~n", [QN, Reason]),
+      error_logger:error_msg("Queue Master Balancer synchronisation error. "
+                             "Queue: ~p, Reason: ~p~n", [QN, Reason]),
   	  void
   end,
   {ok, QN}.
@@ -296,6 +348,12 @@ delete_policy(VHost, QN, User)      -> rabbit_policy:delete(VHost, QN, User).
 
 fetch_queues() -> rabbit_amqqueue:list().
 
+fetch_queue_ids() -> [to_id(Q) || Q <- fetch_queues()].
+
+to_id(Q) ->
+    {resource, VHost, queue, QName} = element(2, Q),
+    {QName, VHost}.
+
 make_report() ->
   QNs = lists:foldl(fun(Q, Acc) -> [get_queue_node(Q)|Acc] end, [], fetch_queues()),
   [count(N, QNs, 0) || N <- rabbit_mnesia:cluster_nodes(running)].
@@ -303,6 +361,14 @@ make_report() ->
 count(N, [], C)      -> {N, {queues, C}};
 count(N, [N|Rem], C) -> count(N, Rem, C+1);
 count(N, [_|Rem], C) -> count(N, Rem, C).
+
+fetch_current_status() ->
+    Pid     = whereis(rabbit_queue_master_balancer),
+    Pending = ets:info(rabbit_queue_master_balancer, size),
+    {memory, Memory}  = process_info(Pid, memory),
+    [{'process_id', Pid},
+     {'queues_pending_balance', Pending},
+     {'memory_utilization', Memory}].
 
 get_queue(VHost, QN) ->
   {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, QN)),
@@ -323,9 +389,11 @@ ts() ->
   {Mega, Sec, USec} = os:timestamp(),
   (Mega * 1000000 + Sec) * 1000 + round(USec/1000).
 
+to_pos('$end_of_table') -> undefined;
+to_pos(Any)             -> Any.
+
 get_policy_trans_delay() ->
-  case rabbit_misc:get_env(?MODULE, policy_transition_delay,
-          ?DEFAULT_POLICY_TRANSITION_DELAY) of
+  case get_config(policy_transition_delay, ?DEFAULT_POLICY_TRANSITION_DELAY) of
     PTD when is_integer(PTD); PTD >= ?DEFAULT_POLICY_TRANSITION_DELAY -> PTD;
     _ ->
       error_logger:info_msg("Queue Master Balancer setting default "
@@ -333,7 +401,9 @@ get_policy_trans_delay() ->
       ?DEFAULT_POLICY_TRANSITION_DELAY
   end.
 
-policy_transition_delay(PTD) -> timer:sleep(PTD).
+policy_transition_delay(PTD) -> delay(PTD).
+
+delay(T) -> timer:sleep(T).
 
 messages(Q) ->
   [{messages, Messages}] = rabbit_amqqueue:info(Q, [messages]),
@@ -347,3 +417,9 @@ get_acting_user(Q) ->
       _,_,_, User} = Q,
       User
   end.
+
+maybe_drop(undefined) -> void;
+maybe_drop(Key)       -> ets:delete(?TAB, Key).
+
+get_config(Tag, Default) ->
+    rabbit_misc:get_env(rabbitmq_queue_master_balancer, Tag, Default).
