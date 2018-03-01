@@ -1,5 +1,7 @@
 ## RabbitMQ Queue Master Balancer
 
+[![Build Status](https://travis-ci.org/Ayanda-D/rabbitmq-queue-master-balancer.svg?branch=master)](https://travis-ci.org/Ayanda-D/rabbitmq-queue-master-balancer)
+
 RabbitMQ Queue Master Balancer is a tool used for attaining queue master equilibrium across a RabbitMQ cluster installation. The plugin achieves this by computing queue master counts on nodes and engaging in shuffling procedures, with the ultimate goal of evenly distributing `queue masters` across RabbitMQ cluster nodes. Internally, the tool comprises of an FSM engine which transitions between different states of operation, to allow the procedures to be carried in a fully controllable manner.
 
 We define **Queue Equilibrium** as the state in which the following condition is/has been satisfied across all running cluster nodes:
