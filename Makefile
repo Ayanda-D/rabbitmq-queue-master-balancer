@@ -12,7 +12,7 @@ define PROJECT_ENV
 endef
 
 define PROJECT_APP_EXTRA_KEYS
-	{broker_version_requirements, []}
+	{broker_version_requirements, ["3.7.0"]}
 endef
 
 DEPS = rabbit_common rabbit amqp_client
