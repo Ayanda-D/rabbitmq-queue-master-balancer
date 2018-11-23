@@ -2,6 +2,8 @@
 .*.sw?
 *.beam
 .erlang.mk/
+.DS_Store
+MnesiaCore.*
 /cover/
 /deps/
 /doc/
