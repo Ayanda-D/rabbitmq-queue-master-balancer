@@ -38,6 +38,8 @@ groups() ->
           successful_queue_balancing_no_ha_no_messages,
           successful_queue_balancing_with_ha_no_messages,
           successful_queue_balancing_with_ha_and_messages,
+          successful_queue_balancing_with_ha_75_queues_300_messages_notraffic,
+          successful_queue_balancing_with_ha_75_queues_300_messages_traffic,
           unsuccessful_queue_balancing_no_ha_with_messages
         ]}
     ].
@@ -87,30 +89,55 @@ successful_queue_balancing_no_ha_no_messages(Config) ->
   setup_queue_master_balancer(Config, A),
   Queues  = 4,
   Messages= 0,
-  Delay   = 1000,
-  init_queues(Config, 0, Queues, Messages),
-  passed  = successful_run(Config, Queues, Nodes, Delay).
+  Delay   = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_run(Config, Queues, Nodes, Delay).
 
 successful_queue_balancing_with_ha_no_messages(Config) ->
   [A|_]   = Nodes = get_node_names(Config, 3),
   setup_queue_master_balancer(Config, A),
   Queues  = 4,
   Messages= 0,
-  Delay   = 1000,
-  init_queues(Config, 0, Queues, Messages),
+  Delay   = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
   passed  = successful_run(Config, Queues, Nodes, Delay),
-  verify_ha(Config).
+  passed  = verify_ha(Config).
 
 successful_queue_balancing_with_ha_and_messages(Config) ->
   [A|_]  = Nodes = get_node_names(Config, 3),
   setup_queue_master_balancer(Config, A),
   Queues   = 4,
   Messages = 10,
-  Delay    = 1000,
-  init_queues(Config, 0, Queues, Messages),
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
   passed = successful_run(Config, Queues, Nodes, Delay),
-  verify_ha(Config),
-  verify_messages(Config, 0, Messages).
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_balancing_with_ha_75_queues_300_messages_notraffic(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A),
+  Queues   = 75,
+  Messages = 300,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_run(Config, Queues, Nodes, Delay),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_balancing_with_ha_75_queues_300_messages_traffic(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A),
+  Queues   = 75,
+  Messages = 200,
+  ActiveMessages = 100,
+  Rate  = 10, %% Messages per second
+  Delay = 50,
+  {ok, Ch} = init_queues(Config, 0, Queues, Messages),
+  generate_traffic(Ch, ActiveMessages, Rate),
+  passed = successful_run(Config, Queues, Nodes, Delay),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages + ActiveMessages).
 
 unsuccessful_queue_balancing_no_ha_with_messages(Config) ->
   [A|_]   = Nodes = get_node_names(Config, 3),
@@ -119,8 +146,8 @@ unsuccessful_queue_balancing_no_ha_with_messages(Config) ->
   Messages= 10,
   Delay   = 50,
   init_queues(Config, 0, Queues, Messages),
-  passed  = unsuccessful_run(Config, Queues, Nodes, Delay),
-  verify_messages(Config, 0, Messages).
+  passed = unsuccessful_run(Config, Queues, Nodes, Delay),
+  passed = verify_messages(Config, 0, Messages).
 
 
 successful_run(Config, N, [A, B, C], Delay) ->
@@ -156,11 +183,8 @@ successful_run(Config, N, [A, B, C], Delay) ->
   ok    = continue(Config, A),
   Info4 = info(Config, A),
 
-  %% Wait for Balancing Complete
-  delay(Delay),
-
-  %% Balancing Complete: Info5
-  Info5 = info(Config, A),
+  %% Wait for Balancing Complete: Info5
+  {ok, Info5} = wait_until_complete(Config, A, Delay),
 
   %% Stop: Info6
   ok    = stop(Config, A),
@@ -290,7 +314,8 @@ init_queues(Config, Node, NQs, NMsgs) ->
   Ch = rabbit_ct_client_helpers:open_channel(Config, Node),
   setup_exchange(Ch),
   declare_queues(Ch, NQs),
-  publish(Ch, NMsgs).
+  publish(Ch, NMsgs),
+  {ok, Ch}.
 
 setup_exchange(Ch) ->
     XD =  #'exchange.declare'{exchange = ?EXHANGE,
@@ -309,6 +334,17 @@ declare_queues(Ch, NQs) ->
                                             routing_key = ?RK})
   end || N <- lists:seq(1, NQs)],
   ok.
+
+%% Very simple traffic generator. Spawn a publisher at passed Rate
+%% every second till messages aggregate have been published
+generate_traffic(_Ch, 0, _Rate) -> ok;
+generate_traffic(Ch, Aggregate, Rate) when Aggregate < Rate ->
+    %% Send remaining messages
+    _Pid = spawn(fun() -> publish(Ch, Aggregate) end);
+generate_traffic(Ch, Aggregate, Rate) when Aggregate >= Rate ->
+    _Pid = spawn(fun() -> publish(Ch, Rate) end),
+    timer:sleep(1000),
+    generate_traffic(Ch, Aggregate - Rate, Rate).
 
 publish(Ch, NMsgs) ->
   [begin
@@ -360,7 +396,7 @@ setup_queue_master_balancer(Config, Node) ->
 init_queue_master_balancer_remote() ->
   application:set_env(rabbitmq_queue_master_balancer, operational_priority, 15),
   application:set_env(rabbitmq_queue_master_balancer, preload_queues, false),
-  application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, 100),
+  application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, 6000000),
   application:set_env(rabbitmq_queue_master_balancer, policy_transition_delay, 100),
 
   ok = application:start(rabbitmq_queue_master_balancer).
@@ -380,13 +416,13 @@ occurance(N, [N|Rem], C) -> occurance(N, Rem, C+1);
 occurance(N, [_|Rem], C) -> occurance(N, Rem, C).
 
 info(Config, N) ->
-  fire_fsm_event(Config, N, info).
+  fire_fsm_event(Config, N, info, [infinity]).
 
 status(Config, N) ->
   fire_fsm_event(Config, N, status).
 
 report(Config, N) ->
-  fire_fsm_event(Config, N, report).
+  fire_fsm_event(Config, N, report, [infinity]).
 
 load_queues(Config, N) ->
   fire_fsm_event(Config, N, load_queues).
@@ -407,13 +443,16 @@ stop(Config, N) ->
   fire_fsm_event(Config, N, stop).
 
 fire_fsm_event(Config, N, Cmd) ->
+    fire_fsm_event(Config, N, Cmd, []).
+fire_fsm_event(Config, N, Cmd, Args) ->
   rabbit_ct_broker_helpers:rpc(Config, N,
-    rabbit_queue_master_balancer, Cmd, []).
+    rabbit_queue_master_balancer, Cmd, Args).
 
 verify_ha(Config) ->
   Cluster = get_node_names(Config, 3),
   QNs     = get_queue_names_and_nodes(Config),
-  [passed = assert_slaves(Config, 0, QN, {N, Cluster--[N]}) || {QN, N} <- QNs].
+  [passed = assert_slaves(Config, 0, QN, {N, Cluster--[N]}) || {QN, N} <- QNs],
+  passed.
 
 assert_slaves(Config, RPCNode, QName, {ExpMNode, ExpSNodes}) ->
   Q = find_queue(Config, QName, RPCNode),
@@ -467,6 +506,16 @@ verify_messages(Config, Node, ExpectedMessageCount) ->
       rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_amqqueue, info,
         [Q, [messages]])
    || Q <- rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_amqqueue, list, [])
-  ].
+  ],
+  passed.
 
- delay(T) -> timer:sleep(T).
+delay(T) -> timer:sleep(T).
+
+%% CT tests will timeout and fail if completion is prolonged!
+wait_until_complete(Config, A, T) ->
+    case pget(phase, Info = info(Config, A)) of
+        ?STATE_IDLE -> {ok, Info};
+        _ ->
+            delay(T),
+            wait_until_complete(Config, A, T)
+    end.

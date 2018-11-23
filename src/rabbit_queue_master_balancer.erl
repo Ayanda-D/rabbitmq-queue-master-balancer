@@ -303,27 +303,21 @@ shuffle_queue(Q, _MinMaster, _Priority, _PTD, _SynchTimeout, _VSNComp) ->
 
 shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _User, M) when M > 0 ->
 {ok, QN};
-shuffle(VHost, QN, Policy, MinMaster, _QPid, SPids, Priority, PTD, SynchTimeout,
+shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD, SynchTimeout,
     User, _M) ->
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
-  ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
   ok = policy_transition_delay(PTD),
+  ok = ensure_sync(VHost, QN, SynchTimeout),
   ok = set_policy(VHost, QN, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
          [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>, User),
   ok = policy_transition_delay(PTD),
+  ok = ensure_sync(VHost, QN, SynchTimeout),
   ok = delete_policy(VHost, QN, User),
   ok = policy_transition_delay(PTD),
+  ok = ensure_sync(VHost, QN, SynchTimeout),
   ok = reset_policy(Policy, PTD, User),
   ok = policy_transition_delay(PTD),
-  ok = rabbit_queue_master_balancer_sync:sync_mirrors(SPids, get_queue(VHost, QN)),
-  try
-  	  rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SynchTimeout)
-  catch
-  	_:Reason ->
-      error_logger:error_msg("Queue Master Balancer synchronisation error. "
-                             "Queue: ~p, Reason: ~p~n", [QN, Reason]),
-  	  void
-  end,
+  ok = ensure_sync(VHost, QN, SynchTimeout),
   {ok, QN}.
 
 set_policy(VHost, QN, Pattern, Spec, Priority, ApplyTo, undefined) ->
@@ -374,8 +368,8 @@ get_queue(VHost, QN) ->
   {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, QN)),
   Q.
 
-get_queue_node(Q) ->
-  node(case Q of
+get_queue_node(AMQQueue) ->
+  node(case AMQQueue of
           {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live} ->
             Pid;
           {amqqueue, {resource, _,queue,_},_,_,_,_,Pid,_,_,_,_,_,_,live,_} ->
@@ -384,6 +378,17 @@ get_queue_node(Q) ->
             Pid;
           Other -> error({unsupported_version, Other})
        end).
+
+get_queue_slaves(AMQQueue) ->
+  case AMQQueue of
+      {amqqueue, {resource, _, queue, _},_,_,_,_,_,SPids,_,_,_,_,_,live} ->
+         SPids;
+      {amqqueue, {resource, _, queue, _},_,_,_,_,_,SPids,_,_,_,_,_,live,_} ->
+         SPids;
+      {amqqueue,{resource, _, queue, _},_,_,_,_,_,SPids,_,_,_,_,_,_,live,_,_,_,_} ->
+         SPids;
+    Other -> error({unsupported_version, Other})
+  end.
 
 ts() ->
   {Mega, Sec, USec} = os:timestamp(),
@@ -401,9 +406,7 @@ get_policy_trans_delay() ->
       ?DEFAULT_POLICY_TRANSITION_DELAY
   end.
 
-policy_transition_delay(PTD) -> delay(PTD).
-
-delay(T) -> timer:sleep(T).
+policy_transition_delay(PTD) -> ?DELAY(PTD).
 
 messages(Q) ->
   [{messages, Messages}] = rabbit_amqqueue:info(Q, [messages]),
@@ -423,3 +426,18 @@ maybe_drop(Key)       -> ets:delete(?TAB, Key).
 
 get_config(Tag, Default) ->
     rabbit_misc:get_env(rabbitmq_queue_master_balancer, Tag, Default).
+
+ensure_sync(VHost, QN, SynchTimeout) ->
+  try
+      %% TODO: Distinct queue master verification timeout!
+      ok = rabbit_queue_master_balancer_sync:verify_master(VHost, QN),
+      AMQQueue = get_queue(VHost, QN),
+      SPids = get_queue_slaves(AMQQueue),
+      ok = rabbit_queue_master_balancer_sync:sync_mirrors(AMQQueue),
+      ok = rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SynchTimeout)
+  catch
+      _:Reason ->
+            error_logger:error_msg("Queue Master Balancer synchronisation error. "
+                                   "Queue: ~p, Reason: ~p~n", [QN, Reason]),
+            exit(Reason)
+  end.

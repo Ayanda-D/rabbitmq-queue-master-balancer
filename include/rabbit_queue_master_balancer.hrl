@@ -17,6 +17,9 @@
 -define(DEFAULT_OPERATIONAL_PRIORITY,    5).
 -define(DEFAULT_POLICY_TRANSITION_DELAY, 50).
 -define(DEFAULT_SYNC_DELAY_TIMEOUT,      3000).
+-define(DEFAULT_MASTER_VERIFICATION_TIMEOUT, 300000).
+-define(DEFAULT_QLOOKUP_DELAY,           200).
+-define(DELAY(T),                        timer:sleep(T)).
 
 -define(STATE_IDLE,             idle).
 -define(STATE_READY,            ready).
