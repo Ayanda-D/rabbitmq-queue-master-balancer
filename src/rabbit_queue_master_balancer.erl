@@ -63,7 +63,7 @@
 -define(TAB,       ?MODULE).
 -define(SIZE,      ets:info(?TAB, size)).
 -define(FIRST,     ets:first(?TAB)).
--define(DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT,  5000).
+-define(DEFAULT_ALL_STATE_EVENT_CALL_TIMEOUT,  30000).
 
 %% --------
 %% FSM API
