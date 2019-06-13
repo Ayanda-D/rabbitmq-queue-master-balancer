@@ -16,6 +16,7 @@
 
 -module(rabbit_queue_master_balancer).
 -behaviour(gen_fsm).
+-compile(nowarn_deprecated_function).
 
 -export([start_link/0, load_queues/0, load_queues/1, go/0, pause/0, continue/0,
          info/0, info/1, reset/0, status/0, report/0, report/1, stop/0, shutdown/0]).
