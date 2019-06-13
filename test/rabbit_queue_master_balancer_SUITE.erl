@@ -26,6 +26,12 @@
 -define(VHOST,   <<"/">>).
 -define(EXHANGE, <<"qbx">>).
 -define(RK,      <<"qbr">>).
+-define(TEST_OPERATIONAL_PRIORITY,        15).
+-define(TEST_PRELOAD_QUEUES,              false).
+-define(TEST_SYNC_DELAY_TIMEOUT,          15000).
+-define(TEST_SYNC_VERIFICATION_FACTOR,    100).
+-define(TEST_MASTER_VERIFICATION_TIMEOUT, 20000).
+-define(TEST_POLICY_TRANSITION_DELAY,     100).
 
 all() ->
     [
@@ -35,6 +41,7 @@ all() ->
 groups() ->
     [
       {non_parallel_state_tests, [], [
+          successful_queue_balancing_configuration,
           successful_queue_balancing_no_ha_no_messages,
           successful_queue_balancing_with_ha_no_messages,
           successful_queue_balancing_with_ha_and_messages,
@@ -84,6 +91,18 @@ end_per_testcase(Testcase, Config) ->
 %% ------------
 %% Test Cases
 %% ------------
+successful_queue_balancing_configuration(Config) ->
+  [A|_]   = _Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A),
+  Info = info(Config, A),
+  true = (pget(operational_priority, Info) == ?TEST_OPERATIONAL_PRIORITY),
+  true = (pget(preload_queues, Info) == ?TEST_PRELOAD_QUEUES),
+  true = (pget(sync_delay_timeout, Info) == ?TEST_SYNC_DELAY_TIMEOUT),
+  true = (pget(sync_verification_factor, Info) == ?TEST_SYNC_VERIFICATION_FACTOR),
+  true = (pget(master_verification_timeout, Info) == ?TEST_MASTER_VERIFICATION_TIMEOUT),
+  true = (pget(policy_transition_delay, Info) == ?TEST_POLICY_TRANSITION_DELAY),
+  passed.
+
 successful_queue_balancing_no_ha_no_messages(Config) ->
   [A|_]   = Nodes = get_node_names(Config, 3),
   setup_queue_master_balancer(Config, A),
@@ -160,7 +179,6 @@ successful_run(Config, N, [A, B, C], Delay) ->
   Info0 = info(Config, A),
   Status0 = status(Config, A),
   ?STATE_IDLE = pget(phase, Info0),
-
   QNodes = [FN|_] = get_queue_nodes(Config),
   NNodes = length(QNodes),
   NNodes = occurance(FN, QNodes, 0),
@@ -394,10 +412,12 @@ setup_queue_master_balancer(Config, Node) ->
          ?MODULE, init_queue_master_balancer_remote, []).
 
 init_queue_master_balancer_remote() ->
-  application:set_env(rabbitmq_queue_master_balancer, operational_priority, 15),
-  application:set_env(rabbitmq_queue_master_balancer, preload_queues, false),
-  application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, 6000000),
-  application:set_env(rabbitmq_queue_master_balancer, policy_transition_delay, 100),
+  application:set_env(rabbitmq_queue_master_balancer, operational_priority, ?TEST_OPERATIONAL_PRIORITY),
+  application:set_env(rabbitmq_queue_master_balancer, preload_queues, ?TEST_PRELOAD_QUEUES),
+  application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, ?TEST_SYNC_DELAY_TIMEOUT),
+  application:set_env(rabbitmq_queue_master_balancer, sync_verification_factor, ?TEST_SYNC_VERIFICATION_FACTOR),
+  application:set_env(rabbitmq_queue_master_balancer, master_verification_timeout, ?TEST_MASTER_VERIFICATION_TIMEOUT),
+  application:set_env(rabbitmq_queue_master_balancer, policy_transition_delay, ?TEST_POLICY_TRANSITION_DELAY),
 
   ok = application:start(rabbitmq_queue_master_balancer).
 
