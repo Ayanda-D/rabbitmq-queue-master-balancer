@@ -17,11 +17,24 @@
 -define(DEFAULT_OPERATIONAL_PRIORITY,    5).
 -define(DEFAULT_POLICY_TRANSITION_DELAY, 50).
 -define(DEFAULT_SYNC_DELAY_TIMEOUT,      3000).
+-define(DEFAULT_SYNC_VERIFICATION_FACTOR,500).
 -define(DEFAULT_MASTER_VERIFICATION_TIMEOUT, 300000).
--define(DEFAULT_QLOOKUP_DELAY,           200).
 -define(DELAY(T),                        timer:sleep(T)).
+-define(SYNC_THRESHOLD,                  100).
+-define(PTD_THRESHOLD,                   100).
 
 -define(STATE_IDLE,             idle).
 -define(STATE_READY,            ready).
 -define(STATE_BALANCING_QUEUES, balancing_queues).
 -define(STATE_PAUSE,            pause).
+
+-define(UPDATE_RELATIVE(Msgs, DelayFactor, MsgThreshold, Default),
+            (case {Msgs, DelayFactor, Default} of
+                {Msgs, DelayFactor, Default} when Msgs =< MsgThreshold,
+                                                  DelayFactor < Default ->
+                    Default;
+                {Msgs, DelayFactor, Default} when Msgs =< MsgThreshold ->
+                    DelayFactor;
+                {Msgs, DelayFactor, _Default} ->
+                    ((Msgs div MsgThreshold) + 1 ) * DelayFactor
+            end)).

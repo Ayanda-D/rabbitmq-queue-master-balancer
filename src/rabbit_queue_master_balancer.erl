@@ -53,7 +53,10 @@
                 size_t       = 0,
                 balanced     = 0,
                 op_priority,
-                sync_timeout,
+                preload_queues,
+                sync_delay_timeout,
+                sync_verification_factor,
+                master_verification_timeout,
                 policy_trans_delay,
                 balance_ts}).
 
@@ -115,15 +118,20 @@ status() -> fetch_current_status().
 init([Parent]) ->
   process_flag(trap_exit, true),
   ?MODULE      = ets:new(?MODULE, [named_table, set, private]),
-  ok           = init_queues(),
+  {ok, Preload}= init_queues(),
   OpPriority   = get_config(operational_priority, ?DEFAULT_OPERATIONAL_PRIORITY),
-  SynchTimeout = get_config(sync_delay_timeout, ?DEFAULT_SYNC_DELAY_TIMEOUT),
+  SDT          = get_config(sync_delay_timeout, ?DEFAULT_SYNC_DELAY_TIMEOUT),
+  SVF          = get_config(sync_verification_factor, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
+  MVT          = get_config(master_verification_timeout, ?DEFAULT_MASTER_VERIFICATION_TIMEOUT),
   PTD          = get_policy_trans_delay(),
   {ok, ?STATE_IDLE, #state{parent_pid         = Parent,
                            phase              = ?STATE_IDLE,
+                           preload_queues     = Preload,
                            position           = ?FIRST,
                            op_priority        = OpPriority,
-                           sync_timeout       = SynchTimeout,
+                           sync_delay_timeout = SDT,
+                           sync_verification_factor    = SVF,
+                           master_verification_timeout = MVT,
                            policy_trans_delay = PTD}}.
 
 handle_sync_event('$load_queues', _From, _StateName, State = #state{}) ->
@@ -192,12 +200,14 @@ balancing_queues('$balance_queues',
                                   prev               =  Prev,
                                   balanced           =  Balanced,
                                   op_priority        =  OpPriority,
-                                  sync_timeout       =  SynchTimeout,
+                                  sync_delay_timeout =  SDT,
+                                  sync_verification_factor    = SVF,
+                                  master_verification_timeout = MVT,
                                   policy_trans_delay =  PTD}) ->
   case ets:lookup(?TAB, Pos) of
     [{Pos, {QName, VHost}}] ->
         {ok, QName} =
-            balance_queue(get_queue(VHost, QName), OpPriority, PTD, SynchTimeout),
+            balance_queue(get_queue(VHost, QName), OpPriority, PTD, MVT, SDT, SVF),
             maybe_drop(Prev);
     _ ->
         void
@@ -232,7 +242,8 @@ init_queues() ->
   PreloadQueues = get_config(preload_queues, false),
   if PreloadQueues -> insert_queues();
     true           -> ok
-  end.
+  end,
+  {ok, PreloadQueues}.
 
 insert_queues() ->
     lists:foldl(fun(Entry = {_Q, _V}, Acc) ->
@@ -247,7 +258,10 @@ to_info(#state{parent_pid         = PPid,
                size_t             = Size,
                balanced           = Balanced,
                op_priority        = Priority,
-               sync_timeout       = SynchTimeout,
+               preload_queues     = PreloadQueues,
+               sync_delay_timeout = SDT,
+               sync_verification_factor    = SVF,
+               master_verification_timeout = MVT,
                policy_trans_delay = PTD,
                balance_ts         = TS}) ->
   [{parent_pid,              PPid},
@@ -255,70 +269,74 @@ to_info(#state{parent_pid         = PPid,
    {total,                   Size},
    {position,                to_pos(Pos)},
    {balanced,                Balanced},
+   {preload_queues,          PreloadQueues},
    {operational_priority,    Priority},
-   {sync_timeout,            SynchTimeout},
+   {sync_delay_timeout,      SDT},
+   {sync_verification_factor,SVF},
+   {master_verification_timeout, MVT},
    {policy_transition_delay, PTD},
    {last_balance_timestamp,  TS}].
 
-balance_queue(Q, Priority, PTD, SynchTimeout) ->
+balance_queue(Q, Priority, PTD, MVT, SDT, SVF) ->
     %% Aqcuire Min-master
     {ok, MinMaster} =
        rabbit_queue_location_min_masters:queue_master_location(Q),
     try
        User      = get_acting_user(Q),
-       {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, SynchTimeout, User)
+       {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, MVT, SDT, SVF, User)
     catch
        _:Reason -> {error, Reason}
     end.
 
 %% 3.6.0 <--> 3.6.5
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live}, MinMaster, Priority, PTD, SynchTimeout, User) ->
+	Policy,_,_,live}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q));
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
+  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
       {ok, QName};
 
 %% 3.6.6 <--> 3.6.x
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live,_}, MinMaster, Priority, PTD, SynchTimeout, User) ->
+	Policy,_,_,live,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q));
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
+  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
       {ok, QName};
 
 %% 3.7.0 --> ...
 shuffle_queue(Q = {amqqueue,{resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-  Policy,_,_,_,live,_,_,_,_}, MinMaster, Priority, PTD, SynchTimeout, User) ->
+  Policy,_,_,_,live,_,_,_,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      SynchTimeout, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q));
 shuffle_queue({amqqueue,{resource, _VHost, queue, QName},_,_,_,_,_,_,_,_,_,_,_,
-  _,_,_,_,_,_}, _MinMaster, _Priority, _PTD, _SynchTimeout, _User) ->
+  _,_,_,_,_,_}, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
       {ok, QName};
 
 %% Unsupported version
-shuffle_queue(Q, _MinMaster, _Priority, _PTD, _SynchTimeout, _VSNComp) ->
+shuffle_queue(Q, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _VSNComp) ->
   throw({unsupported_version, Q}).
 
-shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _User, M) when M > 0 ->
+shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _, _, _User, M) when M > 0 ->
 {ok, QN};
-shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD, SynchTimeout,
-    User, _M) ->
+shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD0, MVT, SDT, SVF,
+    User, M) ->
+  PTD =  ?UPDATE_RELATIVE(M, PTD0, ?PTD_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
   ok = policy_transition_delay(PTD),
-  ok = ensure_sync(VHost, QN, SynchTimeout),
+  ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = set_policy(VHost, QN, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
          [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>, User),
   ok = policy_transition_delay(PTD),
-  ok = ensure_sync(VHost, QN, SynchTimeout),
+%%ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = delete_policy(VHost, QN, User),
   ok = policy_transition_delay(PTD),
-  ok = ensure_sync(VHost, QN, SynchTimeout),
+  ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = reset_policy(Policy, PTD, User),
   ok = policy_transition_delay(PTD),
-  ok = ensure_sync(VHost, QN, SynchTimeout),
+  ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   {ok, QN}.
 
 set_policy(VHost, QN, Pattern, Spec, Priority, ApplyTo, undefined) ->
@@ -380,7 +398,7 @@ get_queue_node(AMQQueue) ->
           Other -> error({unsupported_version, Other})
        end).
 
-get_queue_slaves(AMQQueue) ->
+get_queue_spids(AMQQueue) ->
   case AMQQueue of
       {amqqueue, {resource, _, queue, _},_,_,_,_,_,SPids,_,_,_,_,_,live} ->
          SPids;
@@ -428,14 +446,13 @@ maybe_drop(Key)       -> ets:delete(?TAB, Key).
 get_config(Tag, Default) ->
     rabbit_misc:get_env(rabbitmq_queue_master_balancer, Tag, Default).
 
-ensure_sync(VHost, QN, SynchTimeout) ->
+ensure_sync(VHost, QN, MVT, SDT, SVF) ->
   try
-      %% TODO: Distinct queue master verification timeout!
-      ok = rabbit_queue_master_balancer_sync:verify_master(VHost, QN),
+      ok = rabbit_queue_master_balancer_sync:verify_master(VHost, QN, MVT, SVF),
       AMQQueue = get_queue(VHost, QN),
-      SPids = get_queue_slaves(AMQQueue),
+      SPids = get_queue_spids(AMQQueue),
       ok = rabbit_queue_master_balancer_sync:sync_mirrors(AMQQueue),
-      ok = rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SynchTimeout)
+      ok = rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SDT, SVF)
   catch
       _:Reason ->
             error_logger:error_msg("Queue Master Balancer synchronisation error. "

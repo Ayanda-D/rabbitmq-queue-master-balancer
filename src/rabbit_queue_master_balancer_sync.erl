@@ -16,8 +16,10 @@
 
 -module(rabbit_queue_master_balancer_sync).
 
--export([sync_mirrors/1, verify_sync/3, verify_sync/4]).
--export([verify_master/2, verify_master/3, verify_master/4]).
+-export([sync_mirrors/1, verify_sync/3, verify_sync/4, verify_sync/5,
+         verify_sync/7]).
+-export([verify_master/2, verify_master/3, verify_master/4,
+         verify_master/6]).
 
 -include("rabbit_queue_master_balancer.hrl").
 
@@ -27,20 +29,20 @@
 -spec verify_sync(binary(), binary(), list(), integer())    -> 'ok'.
 % ----------------------------------------------------------------
 
--define(SLEEP,  (?DELAY(?DEFAULT_QLOOKUP_DELAY))).
-
 sync_mirrors(Q) ->
   _Any = rabbit_amqqueue:sync_mirrors(Q),
   ok.
 
 verify_sync(VHost, QN, SPids) ->
   verify_sync(VHost, QN, SPids, ?DEFAULT_SYNC_DELAY_TIMEOUT).
-
 verify_sync(VHost, QN, SPids, Timeout) ->
+  verify_sync(VHost, QN, SPids, Timeout, ?DEFAULT_SYNC_VERIFICATION_FACTOR).
+verify_sync(VHost, QN, SPids, Timeout, DelayFactor) ->
   SynchPPid = self(),
   SynchRef  = make_ref(),
   Syncher   = spawn(fun() ->
-                        verify_sync(VHost, SynchPPid, SynchRef, QN, SPids)
+                        verify_sync(VHost, SynchPPid, SynchRef, 0, DelayFactor,
+                                    QN, SPids)
                     end),
   receive
     {Syncher, _SyncherRef, done} -> ok;
@@ -49,29 +51,34 @@ verify_sync(VHost, QN, SPids, Timeout) ->
     exit(Syncher, {timeout, ?MODULE})
   end.
 
-verify_sync(VHost, SynchPPid, SynchRef, QN, SPids) ->
-  SSPs = length(synchronised_slave_pids(VHost, QN)),
-  if SSPs =:= length(SPids) -> SynchPPid ! {self(), SynchRef, done};
-     true -> verify_sync(VHost, SynchPPid, SynchRef, QN, SPids)
+verify_sync(VHost, SynchPPid, SynchRef, SynchPeriod, DelayFactor, QN, SPids) ->
+  {SSPids, Msgs} = synchronised_slave_pids(VHost, QN, SynchPeriod),
+  SynchPeriod0 = ?UPDATE_RELATIVE(Msgs, DelayFactor, ?SYNC_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
+  if length(SSPids) =:= length(SPids) -> SynchPPid ! {self(), SynchRef, done};
+     true -> verify_sync(VHost, SynchPPid, SynchRef, SynchPeriod0, DelayFactor, QN, SPids)
   end.
 
-synchronised_slave_pids(VHost, Queue) ->
-    ?SLEEP,
+synchronised_slave_pids(VHost, Queue, SynchPeriod) ->
+    ?DELAY(SynchPeriod),
     {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, Queue)),
     SSP = synchronised_slave_pids,
-    [{SSP, Pids}] = rabbit_amqqueue:info(Q, [SSP]),
-    case Pids of
-        '' -> [];
-        _  -> Pids
+    MGS = messages,
+    [{SSP, Pids},{MGS, Msgs}] = rabbit_amqqueue:info(Q, [SSP, MGS]),
+    case {Pids, Msgs} of
+        {'', _} -> {[], Msgs};
+        {_,  _} -> {Pids, Msgs}
     end.
 
 verify_master(VHost, QN) ->
     verify_master(VHost, QN, ?DEFAULT_MASTER_VERIFICATION_TIMEOUT).
 verify_master(VHost, QN, Timeout) ->
+    verify_master(VHost, QN, Timeout, ?DEFAULT_SYNC_VERIFICATION_FACTOR).
+verify_master(VHost, QN, Timeout, DelayFactor) ->
   VerifierPPid = self(),
   VerifierRef  = make_ref(),
   Verifier     = spawn(fun() ->
-                        verify_master(VHost, VerifierPPid, VerifierRef, QN)
+                        verify_master(VHost, VerifierPPid, VerifierRef,
+                                      0, DelayFactor, QN)
                     end),
   receive
     {Verifier, _VerifierRef, alive} -> ok;
@@ -80,17 +87,20 @@ verify_master(VHost, QN, Timeout) ->
     exit(Verifier, {verify_master_timeout, ?MODULE})
   end.
 
-verify_master(VHost, VerifierPPid, VerifierRef, QN) ->
-  IsQMasterAlive = is_queue_master_alive(VHost, QN),
+verify_master(VHost, VerifierPPid, VerifierRef, VerifierPeriod, X, QN) ->
+  {IsQMasterAlive, VerifierPeriod0} = is_queue_master_alive(VHost, QN, VerifierPeriod, X),
   if IsQMasterAlive -> VerifierPPid ! {self(), VerifierRef, alive};
-     true -> verify_master(VHost, VerifierPPid, VerifierRef, QN)
+     true -> verify_master(VHost, VerifierPPid, VerifierRef, VerifierPeriod0, X, QN)
   end.
 
-is_queue_master_alive(VHost, Queue) ->
-    ?SLEEP,
+is_queue_master_alive(VHost, Queue, VerifierPeriod, X) ->
+    ?DELAY(VerifierPeriod),
     {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, Queue)),
+    MGS = messages,
+    [{MGS, Msgs}] = rabbit_amqqueue:info(Q, [MGS]),
+    VerifierPeriod0 = ?UPDATE_RELATIVE(Msgs, X, ?SYNC_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
     {Pid, State} = get_pid_and_state(Q),
-    is_pid_alive(Pid) andalso (State =:= live).
+    {is_pid_alive(Pid) andalso (State =:= live), VerifierPeriod0}.
 
 %% Queue process can now be exisisting on remote node after migration operations
 is_pid_alive(Pid) when is_pid(Pid) ->
