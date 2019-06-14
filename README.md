@@ -31,7 +31,7 @@ In addition, regardless of its current state, the Queue Master Balancer plugin i
 
 ## Supported RabbitMQ Versions
 
-This plugin is compatible with RabbitMQ 3.6.x and beyond, to the latest release.
+This plugin is compatible with RabbitMQ 3.6.x and beyond (3.7.x), to the latest release.
 
 
 ## Installation
@@ -42,22 +42,27 @@ Download pre-compiled versions from [https://github.com/Ayanda-D/rabbitmq-queue-
 
 ### Build
 
-Clone and switch to branch `stable` of this plugin, then build the plugin by executing `make`. To create a package, execute `make dist` and find the `.ez` package file in the `plugins` directory.
+Clone and switch to branch `v3.6.x` or `v3.7.x` to build the plugin for RabbitMQ versions `3.6.x` or `3.7.x` respectively, then execute `make`. To create a package, execute `make dist` and find the `.ez` package file in the `plugins` directory.
+
+Ensure the RabbitMQ version you are building/packaging for is compatible to the Erlang, as well as Elixir versions installed. For more detail on this, please refer to https://www.rabbitmq.com/which-erlang.html
 
 ### Testing
 
-Likewise, clone and switch to branch `stable`, then execute `make tests` to test the plugin. View test results from the generated HTML files.
+Likewise, clone and switch to branch `v3.6.x` or `v3.7.x` to build the plugin for RabbitMQ versions `3.6.x` or `3.7.x` respectively, then execute `make tests` to test the plugin. View test results from the generated HTML files.
+
+**NOTE:** Tests can take as long as 15 minutes to execute.
 
 ## Configuration
 
-The Queue Master Balancer is configured in the `rabbitmq.config` file as follows:
+The Queue Master Balancer is configured in the `rabbitmq.config` file for versions `3.6.x,` or in the `advanced.config` file, for versions `3.7.x` or later. The following is an example of how it is configured:
 
 ```
 [{rabbitmq_queue_master_balancer,
      [{operational_priority,      5},
       {preload_queues,            false},
       {sync_delay_timeout,        3000},
-      {policy_transition_delay,   50}]
+      {sync_verification_factor,  300},
+      {policy_transition_delay,   100}]
  }].
 
 ```
@@ -65,12 +70,13 @@ The Queue Master Balancer is configured in the `rabbitmq.config` file as follows
 The following table summarizes the meaning of these configuration parameters.
 
 
-| PARAMETER NAME  | DESCRIPTION  | TYPE  |  DEFAULT |
-|---|---|---|---|
-| operational\_priority  | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |  
-| preload\_queues | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
-| sync\_delay_timeout | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before balancing procedure is marked complete  | Integer | 3000 |
-| policy\_transition_delay | Time period (in milliseconds) the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue | Integer | 50  |
+| PARAMETER NAME  | ABBREV | DESCRIPTION  | TYPE  |  DEFAULT |
+|---|---|---|---|---|
+| operational\_priority  | OP | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |
+| preload\_queues | PQ | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
+| sync\_verification\_factor | SVF | Time period factor (in milliseconds), relative to the message count per queue currently being balanced, which the plugin will apply and use to ensure message synchronization when a queue has undergone balance transitions. The delay factor is applied for 100 messages (plus the next), hence if for example, if a queue has a message count of 5110, then the effective delay to ensure synchronization will be 15600 milliseconds | Integer | 300 |
+| sync\_delay_timeout | SDT | Time period (in milliseconds) the plugin should wait for slave queues to synchronize to the master queue before balancing procedure is marked complete  | Integer | 3000 |
+| policy\_transition_delay | PTD | Time period (in milliseconds), relative to the message count per queue currently being balanced, the plugin should wait while changing/transitioning from one policy to another. The plugin undergoes `4` transitions when balancing a queue and similar to `SVF`, the configured `PTD` is proportionally applied for every 100 messages (plus the next) in the current queue undergoing balance transitions | Integer | 50  |
 
 
 ## Operation
@@ -85,13 +91,13 @@ The plugin is enabled like any other standard [RabbitMQ plugin](https://www.rabb
 
 ### 2. Get plugin information
 
-The plugin may be queried for it's current state information at any point of it's operation. This is carried out by executing the `info` call:
+The plugin may be queried for its current state information at any point of its operation. This is carried out by executing the `info` call:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:info().'`
 
 ### 3. Get plugin status
 
-The plugin may be queried for it's status information at any point during it's execution run. Unlike the `info` query, the `status` query is independent of the FSM engine's operational procedures, and gives a short summary of the engine's Process Identifier, Queues Pending Balance and Memory Utilization. The `status` call is executed as follows:
+The plugin may be queried for it's status information at any point during its execution run. Unlike the `info` query, the `status` query is independent of the FSM engine's operational procedures, and gives a short summary of the engine's Process Identifier, Queues Pending Balance and Memory Utilization. The `status` call is executed as follows:
 
 `rabbitmqctl eval 'rabbit_queue_master_balancer:status().'`
 
@@ -149,7 +155,7 @@ The plugin is disabled as follows:
 The following aspects must be put into consideration when putting it to use:
 
  - Queue balancing is a delicate operation which **must** be carried out in a very controlled manner and environment not prone to network partitions. Ensure your network is in a stable condition prior to executing queue balancing procedures.
- - Configuration parameters such as `policy_transition_delay` need to be bumped up as aspects such as cluster size, queue slave count and message size increase.
+ - Configuration parameters such as `PTD` need to be bumped up as aspects such as cluster size, queue slave count and message size increase.
  - The distribution of Queues within a cluster is non-deterministic and a single execution round of the Queue Master Balancer may not be enough to attain immediate equilibria. The plugin may (or may not) need multiple execution rounds before satisfactory queue equilibrium is attained.
 
 ## Example Usage
@@ -181,6 +187,8 @@ which satisfies condition/equation [i], being **>= 70%**.
 
 ## License and Copyright
 
-(c) Erlang Solutions Ltd. 2017-2018
+(c) Erlang Solutions Ltd. 2017-2019
 
 https://www.erlang-solutions.com/
+
+
