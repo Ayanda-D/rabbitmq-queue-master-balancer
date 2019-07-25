@@ -137,7 +137,7 @@ init([Parent]) ->
                            master_verification_timeout = MVT,
                            policy_trans_delay = PTD}}.
 
-handle_sync_event('$load_queues', _From, _StateName, State = #state{}) ->
+handle_sync_event('$load_queues', _From, _StateName, State = #state{phase = ?STATE_IDLE}) ->
   ok = insert_queues(),
   error_logger:info_msg("Queue Master Balancer loading ~p queues~n",
                         [Count = ?SIZE]),
