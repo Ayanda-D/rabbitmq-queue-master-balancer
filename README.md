@@ -58,9 +58,10 @@ The Queue Master Balancer is configured in the `rabbitmq.config` file for versio
 
 ```
 [{rabbitmq_queue_master_balancer,
-     [{operational_priority,      5},
+     [{queue_equilibrium,         70},
+      {operational_priority,      5},
       {preload_queues,            false},
-      {sync_delay_timeout,        3000},
+      {sync_delay_timeout,        10000},
       {sync_verification_factor,  300},
       {policy_transition_delay,   100}]
  }].
@@ -72,6 +73,7 @@ The following table summarizes the meaning of these configuration parameters.
 
 | PARAMETER NAME  | ABBREV | DESCRIPTION  | TYPE  |  DEFAULT |
 |---|---|---|---|---|
+| queue\_equilibrium  | QEQ | The desired queue equilibrium percentage level. Once this queue equilibrium threshold is satisfied across all cluster nodes, balancing will be marked as complete and stop. If set to `ignore` or `undefined`, balancing procedures will run through all queues and ensure they're balanced across the cluster. The minimum allowed queue equilibrium threshold is `50%` and the maximum allowed is `100%`. If set to `100%`, the balancing will operate as in `ignore` or `undefined` configuration mode | Integer | 70 |
 | operational\_priority  | OP | Priority level the plugin will use to balance queues across the cluster. This should be higher than the highest configured policy priority | Integer | 5 |
 | preload\_queues | PQ | Determines whether queues are automatically loaded on plugin start-up before the balancing operation is started | Boolean | false |
 | sync\_verification\_factor | SVF | Time period factor (in milliseconds), relative to the message count per queue currently being balanced, which the plugin will apply and use to ensure message synchronization when a queue has undergone balance transitions. The delay factor is applied for 100 messages (plus the next), hence if for example, if a queue has a message count of 5110, then the effective delay to ensure synchronization will be 15600 milliseconds | Integer | 300 |
@@ -190,5 +192,3 @@ which satisfies condition/equation [i], being **>= 70%**.
 (c) Erlang Solutions Ltd. 2017-2019
 
 https://www.erlang-solutions.com/
-
-

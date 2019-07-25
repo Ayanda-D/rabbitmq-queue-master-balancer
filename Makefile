@@ -4,6 +4,7 @@ PROJECT_MOD = rabbit_queue_master_balancer_app
 
 define PROJECT_ENV
 [
+  {queue_equilibrium,        70},
   {operational_priority,     10},
   {preload_queues,           true},
   {sync_delay_timeout,       10000},
