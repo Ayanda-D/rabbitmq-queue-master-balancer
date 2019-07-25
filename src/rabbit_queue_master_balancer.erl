@@ -54,6 +54,7 @@
                 balanced     = 0,
                 op_priority,
                 preload_queues,
+                queue_equilibrium,
                 sync_delay_timeout,
                 sync_verification_factor,
                 master_verification_timeout,
@@ -120,6 +121,7 @@ init([Parent]) ->
   ?MODULE      = ets:new(?MODULE, [named_table, set, private]),
   {ok, Preload}= init_queues(),
   OpPriority   = get_config(operational_priority, ?DEFAULT_OPERATIONAL_PRIORITY),
+  QEQ          = get_config(queue_equilibrium, ?MAX_QEQ),
   SDT          = get_config(sync_delay_timeout, ?DEFAULT_SYNC_DELAY_TIMEOUT),
   SVF          = get_config(sync_verification_factor, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
   MVT          = get_config(master_verification_timeout, ?DEFAULT_MASTER_VERIFICATION_TIMEOUT),
@@ -129,6 +131,7 @@ init([Parent]) ->
                            preload_queues     = Preload,
                            position           = ?FIRST,
                            op_priority        = OpPriority,
+                           queue_equilibrium  = validate_equilibrium(QEQ),
                            sync_delay_timeout = SDT,
                            sync_verification_factor    = SVF,
                            master_verification_timeout = MVT,
@@ -152,7 +155,7 @@ handle_sync_event('$report', _From, StateName, State) ->
   {reply, {ok, Reply}, StateName, State}.
 
 handle_event('$reset', _StateName, State) ->
-  ets:delete_all_objects(?TAB),
+  clear_queues(),
   {next_state, ?STATE_IDLE, State#state{position  = ?FIRST,
                                         prev      = undefined,
                                         balanced  = 0,
@@ -189,32 +192,39 @@ ready(_Event, State = #state{phase = ?STATE_READY}) ->
   {next_state, ?STATE_READY, State}.
 
 balancing_queues('$balance_queues', State = #state{balanced = Balanced,
-                                                   prev     = Prev,
                                                    position = '$end_of_table'}) ->
-  maybe_drop(Prev),
+  clear_queues(),
   error_logger:info_msg("Queue Master Balancer completed balancing ~p queues",
                         [Balanced]),
   {next_state, ?STATE_IDLE, State#state{prev = undefined, phase = ?STATE_IDLE}};
 balancing_queues('$balance_queues',
                    State = #state{position           =  Pos,
+                                  size_t             =  Total,
                                   prev               =  Prev,
                                   balanced           =  Balanced,
                                   op_priority        =  OpPriority,
+                                  queue_equilibrium  =  QEQ,
                                   sync_delay_timeout =  SDT,
                                   sync_verification_factor    = SVF,
                                   master_verification_timeout = MVT,
                                   policy_trans_delay =  PTD}) ->
-  case ets:lookup(?TAB, Pos) of
-    [{Pos, {QName, VHost}}] ->
-        {ok, QName} =
-            balance_queue(get_queue(VHost, QName), OpPriority, PTD, MVT, SDT, SVF),
-            maybe_drop(Prev);
-    _ ->
-        void
-  end,
+  IsBalanced =
+      case ets:lookup(?TAB, Pos) of
+          [{Pos, {QName, VHost}}] ->
+              {ok, QName, Status0} =
+                  balance_queue(get_queue(VHost, QName), OpPriority, PTD,
+                                MVT, SDT, SVF, Total, QEQ),
+              maybe_drop(Prev),
+              Status0;
+          _ ->
+              false
+      end,
   gen_fsm:send_event(?MODULE, '$balance_queues'),
+  NextPos = if IsBalanced -> '$end_of_table';
+               true -> ets:next(?TAB, Pos)
+            end,
   {next_state, ?STATE_BALANCING_QUEUES,
-      State#state{position   = ets:next(?TAB, Pos),
+      State#state{position   = NextPos,
                   prev       = Pos,
                   balanced   = Balanced + 1,
                   phase      = ?STATE_BALANCING_QUEUES,
@@ -259,6 +269,7 @@ to_info(#state{parent_pid         = PPid,
                balanced           = Balanced,
                op_priority        = Priority,
                preload_queues     = PreloadQueues,
+               queue_equilibrium  = QEQ,
                sync_delay_timeout = SDT,
                sync_verification_factor    = SVF,
                master_verification_timeout = MVT,
@@ -271,58 +282,60 @@ to_info(#state{parent_pid         = PPid,
    {balanced,                Balanced},
    {preload_queues,          PreloadQueues},
    {operational_priority,    Priority},
+   {queue_equilibrium,       QEQ},
    {sync_delay_timeout,      SDT},
    {sync_verification_factor,SVF},
    {master_verification_timeout, MVT},
    {policy_transition_delay, PTD},
    {last_balance_timestamp,  TS}].
 
-balance_queue(Q, Priority, PTD, MVT, SDT, SVF) ->
+balance_queue(Q, Priority, PTD, MVT, SDT, SVF, T, QEQ) ->
     %% Aqcuire Min-master
     {ok, MinMaster} =
        rabbit_queue_location_min_masters:queue_master_location(Q),
     try
-       User      = get_acting_user(Q),
-       {ok, _QN} = shuffle_queue(Q, MinMaster, Priority, PTD, MVT, SDT, SVF, User)
+       User              = get_acting_user(Q),
+       {ok, _QN, _State} =
+         shuffle_queue(Q, MinMaster, Priority, PTD, MVT, SDT, SVF, User, T, QEQ)
     catch
        _:Reason -> {error, Reason}
     end.
 
 %% 3.6.0 <--> 3.6.5
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
+	Policy,_,_,live}, MinMaster, Priority, PTD, MVT, SDT, SVF, User, T, QEQ) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      MVT, SDT, SVF, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q), T, QEQ);
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
-      {ok, QName};
+  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User, T, QEQ) ->
+      {ok, QName, is_balanced(T, QEQ)};
 
 %% 3.6.6 <--> 3.6.x
 shuffle_queue(Q = {amqqueue, {resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-	Policy,_,_,live,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
+	Policy,_,_,live,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User, T, QEQ) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      MVT, SDT, SVF, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q), T, QEQ);
 shuffle_queue({amqqueue, {resource, _, queue, QName},_,_,_,_,_,_,_,_,_,_,_,_,_},
-  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
-      {ok, QName};
+  _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User, T, QEQ) ->
+      {ok, QName, is_balanced(T, QEQ)};
 
 %% 3.7.0 --> ...
 shuffle_queue(Q = {amqqueue,{resource, VHost, queue, QName},_,_,_,_,QPid,SPids,_,_,
-  Policy,_,_,_,live,_,_,_,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User) ->
+  Policy,_,_,_,live,_,_,_,_}, MinMaster, Priority, PTD, MVT, SDT, SVF, User, T, QEQ) ->
     shuffle(VHost, QName, Policy, MinMaster, QPid, SPids, Priority, PTD,
-      MVT, SDT, SVF, User, messages(Q));
+      MVT, SDT, SVF, User, messages(Q), T, QEQ);
 shuffle_queue({amqqueue,{resource, _VHost, queue, QName},_,_,_,_,_,_,_,_,_,_,_,
-  _,_,_,_,_,_}, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User) ->
-      {ok, QName};
+  _,_,_,_,_,_}, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User, T, QEQ) ->
+      {ok, QName, is_balanced(T, QEQ)};
 
 %% Unsupported version
-shuffle_queue(Q, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _VSNComp) ->
+shuffle_queue(Q, _MinMaster, _Priority, _PTD, _MVT, _SDT, _SVF, _User, _T, _QEQ) ->
   throw({unsupported_version, Q}).
 
-shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _, _, _User, M) when M > 0 ->
-{ok, QN};
+shuffle(_, QN, _, _, _, _SPids = [], _, _, _, _, _, _User, M, T, QEQ) when M > 0 ->
+  {ok, QN, is_balanced(T, QEQ)};
 shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD0, MVT, SDT, SVF,
-    User, M) ->
+    User, M, T, QEQ) ->
   PTD =  ?UPDATE_RELATIVE(M, PTD0, ?PTD_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
   ok = policy_transition_delay(PTD),
@@ -330,14 +343,13 @@ shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD0, MVT, SDT, S
   ok = set_policy(VHost, QN, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
          [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>, User),
   ok = policy_transition_delay(PTD),
-%%ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = delete_policy(VHost, QN, User),
   ok = policy_transition_delay(PTD),
   ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = reset_policy(Policy, PTD, User),
   ok = policy_transition_delay(PTD),
   ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
-  {ok, QN}.
+  {ok, QN, is_balanced(T, QEQ)}.
 
 set_policy(VHost, QN, Pattern, Spec, Priority, ApplyTo, undefined) ->
   rabbit_policy:set(VHost, QN, Pattern, Spec, Priority, ApplyTo);
@@ -443,8 +455,38 @@ get_acting_user(Q) ->
 maybe_drop(undefined) -> void;
 maybe_drop(Key)       -> ets:delete(?TAB, Key).
 
+clear_queues() -> ets:delete_all_objects(?TAB).
+
 get_config(Tag, Default) ->
     rabbit_misc:get_env(rabbitmq_queue_master_balancer, Tag, Default).
+
+is_balanced(_Total, Equilibrium) when Equilibrium =:= ignore;
+                                      Equilibrium =:= undefined -> false;
+is_balanced(Total, Equilibrium) when is_number(Equilibrium) ->
+  Report = make_report(),
+  Equilibria = Total div length(Report),
+  try
+    [check_equilibrium(((C / Equilibria) * 100), Equilibrium)
+        || {_N, {queues, C}} <- Report],
+    true
+  catch
+    not_balanced -> false
+  end.
+
+check_equilibrium(Current, QEQ) when Current >= QEQ -> ok;
+check_equilibrium(_Current, _QEQ) -> throw(not_balanced).
+
+validate_equilibrium(QEQ) when QEQ =:= ignore;
+                               QEQ =:= undefined -> QEQ;
+validate_equilibrium(QEQ) when is_number(QEQ), QEQ >= ?MIN_QEQ,
+                               QEQ =< ?MAX_QEQ -> QEQ;
+validate_equilibrium(QEQ) ->
+    error_logger:warning_msg("Queue Master Balancer is configured with an "
+                             "unsupported equilibrium setting ~p. Maximum "
+                             "supported setting is ~p%. Minimum supported "
+                             "setting is ~p%. Applying ~p% as default.  ~n",
+                             [QEQ, ?MAX_QEQ, ?MIN_QEQ, ?MIN_QEQ]),
+    ?MIN_QEQ.
 
 ensure_sync(VHost, QN, MVT, SDT, SVF) ->
   try

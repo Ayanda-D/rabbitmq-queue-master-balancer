@@ -27,6 +27,8 @@
 -define(STATE_READY,            ready).
 -define(STATE_BALANCING_QUEUES, balancing_queues).
 -define(STATE_PAUSE,            pause).
+-define(MAX_QEQ,                100).
+-define(MIN_QEQ,                50).
 
 -define(UPDATE_RELATIVE(Msgs, DelayFactor, MsgThreshold, Default),
             (case {Msgs, DelayFactor, Default} of
@@ -38,3 +40,9 @@
                 {Msgs, DelayFactor, _Default} ->
                     ((Msgs div MsgThreshold) + 1 ) * DelayFactor
             end)).
+
+-define(MIN_MASTERS_FILTER(QArgs, F1, F2),
+            (case rabbit_misc:table_lookup(QArgs, <<"x-queue-master-locator">>) of
+                {_, <<"min-masters">>} -> F1();
+                _ -> F2()
+             end)).

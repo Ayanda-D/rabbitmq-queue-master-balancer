@@ -28,6 +28,7 @@
 -define(RK,      <<"qbr">>).
 -define(TEST_OPERATIONAL_PRIORITY,        15).
 -define(TEST_PRELOAD_QUEUES,              false).
+-define(TEST_QUEUE_EQUILIBRIUM,           ignore).
 -define(TEST_SYNC_DELAY_TIMEOUT,          15000).
 -define(TEST_SYNC_VERIFICATION_FACTOR,    100).
 -define(TEST_MASTER_VERIFICATION_TIMEOUT, 20000).
@@ -47,7 +48,14 @@ groups() ->
           successful_queue_balancing_with_ha_and_messages,
           successful_queue_balancing_with_ha_75_queues_300_messages_notraffic,
           successful_queue_balancing_with_ha_75_queues_300_messages_traffic,
-          unsuccessful_queue_balancing_no_ha_with_messages
+          unsuccessful_queue_balancing_no_ha_with_messages,
+
+          successful_queue_high_equilibrium_with_ha_and_messages,
+          successful_queue_low_equilibrium_with_ha_and_messages,
+          successful_queue_100_percent_equilibrium_with_ha_and_messages,
+          successful_queue_unsupported_high_equilibrium_with_ha_and_messages,
+          successful_queue_unsupported_low_equilibrium_with_ha_and_messages,
+          successful_queue_already_balanced_equilibrium_with_ha_and_messages
         ]}
     ].
 
@@ -88,15 +96,16 @@ end_per_testcase(Testcase, Config) ->
       rabbit_ct_broker_helpers:teardown_steps()),
     rabbit_ct_helpers:testcase_finished(Config1, Testcase).
 
-%% ------------
-%% Test Cases
-%% ------------
+%% ----------------------------------
+%% Test Cases I - without equilibrium
+%% ----------------------------------
 successful_queue_balancing_configuration(Config) ->
   [A|_]   = _Nodes = get_node_names(Config, 3),
   setup_queue_master_balancer(Config, A),
   Info = info(Config, A),
   true = (pget(operational_priority, Info) == ?TEST_OPERATIONAL_PRIORITY),
   true = (pget(preload_queues, Info) == ?TEST_PRELOAD_QUEUES),
+  true = (pget(queue_equilibrium, Info) == ?TEST_QUEUE_EQUILIBRIUM),
   true = (pget(sync_delay_timeout, Info) == ?TEST_SYNC_DELAY_TIMEOUT),
   true = (pget(sync_verification_factor, Info) == ?TEST_SYNC_VERIFICATION_FACTOR),
   true = (pget(master_verification_timeout, Info) == ?TEST_MASTER_VERIFICATION_TIMEOUT),
@@ -168,7 +177,79 @@ unsuccessful_queue_balancing_no_ha_with_messages(Config) ->
   passed = unsuccessful_run(Config, Queues, Nodes, Delay),
   passed = verify_messages(Config, 0, Messages).
 
+%% --------------------------------
+%% Test Cases II - with equilibrium
+%% --------------------------------
+successful_queue_high_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A, QEQ = 80),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, QEQ),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
 
+successful_queue_low_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A, QEQ = 55),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, QEQ),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_100_percent_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A, QEQ = 100),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, QEQ),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_unsupported_high_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A, 110),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, ?MIN_QEQ),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_unsupported_low_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  setup_queue_master_balancer(Config, A, 25),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 50,
+  {ok, _Ch} = init_queues(Config, 0, Queues, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, ?MIN_QEQ),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+successful_queue_already_balanced_equilibrium_with_ha_and_messages(Config) ->
+  [A|_]  = Nodes = get_node_names(Config, 3),
+  QArgs  = [{<<"x-queue-master-locator">>, longstr, <<"min-masters">>}],
+  setup_queue_master_balancer(Config, A, QEQ = 60),
+  Queues   = 20,
+  Messages = 10,
+  Delay    = 0, %% low delay - queues already balanced by <<"min-masters">>
+  {ok, _Ch} = init_queues(Config, 0, Queues, QArgs, Messages),
+  passed = successful_equilibrium_run(Config, Queues, Nodes, Delay, QEQ, QArgs),
+  passed = verify_ha(Config),
+  passed = verify_messages(Config, 0, Messages).
+
+%% --------
+%% Internal
+%% --------
 successful_run(Config, N, [A, B, C], Delay) ->
   QNodes0 = get_queue_nodes(Config),
   true = (occurance(A, QNodes0) == N),
@@ -325,13 +406,137 @@ unsuccessful_run(Config, N, [A, B, C], Delay) ->
 
   passed.
 
+
+successful_equilibrium_run(Config, N, [A, B, C], Delay, QEQ) ->
+  successful_equilibrium_run(Config, N, [A, B, C], Delay, QEQ, []).
+
+successful_equilibrium_run(Config, N, [A, B, C], Delay, QEQ, QArgs) ->
+  QNodes0 = get_queue_nodes(Config),
+  AvgQs   = N div 3,
+  ?MIN_MASTERS_FILTER(QArgs,
+    fun() ->
+      true = (occurance(A, QNodes0) >= AvgQs),
+      true = (occurance(B, QNodes0) >= AvgQs),
+      true = (occurance(C, QNodes0) >= AvgQs)
+    end,
+    fun() ->
+      true = (occurance(A, QNodes0) == N),
+      true = (occurance(B, QNodes0) == 0),
+      true = (occurance(C, QNodes0) == 0)
+    end),
+
+  %% Idle: Info0
+  Info0 = info(Config, A),
+  Status0 = status(Config, A),
+  ?STATE_IDLE = pget(phase, Info0),
+  QNodes = [FN|_] = get_queue_nodes(Config),
+  NNodes = length(QNodes),
+  true = ?MIN_MASTERS_FILTER(QArgs,
+            fun() -> (NNodes div 3) >= AvgQs end,
+            fun() -> NNodes =:= occurance(FN, QNodes, 0) end),
+
+  %% Load Queues: Info1
+  {ok, N} = load_queues(Config, A),
+  Info1   = info(Config, A),
+  Status1 = status(Config, A),
+
+  %% Balance Queues: Info2
+  ok    = balance_queues(Config, A),
+  Info2 = info(Config, A),
+  Status2 = status(Config, A),
+
+  %% Wait for Balancing Complete: Info3
+  {ok, Info3} = wait_until_complete(Config, A, Delay),
+
+  %% Stop: Info4
+  ok    = stop(Config, A),
+  Info4 = info(Config, A),
+
+  %% Reset: Info5
+  ok    = reset(Config, A),
+  Info5 = info(Config, A),
+  Status5 = status(Config, A),
+
+  %% Verify Idle Info0
+  ?STATE_IDLE = pget(phase, Info0),
+  true  = (pget(total,    Info0) == 0),
+  true  = (pget(position, Info0) == undefined),
+  false = (pget(balanced, Info0) >  0),
+
+  %% Verify Load Queues Info1
+  ?STATE_READY = pget(phase, Info1),
+  true = (pget(total,    Info1) == N),
+  true = (pget(position, Info1) >= 0),
+  false= (pget(balanced, Info1) >  0),
+
+  %% Verify Info2
+  ?STATE_BALANCING_QUEUES = pget(phase, Info2),
+  true = (pget(total,    Info2) == N),
+  true = (pget(position, Info2) >= 0),
+  true = (pget(balanced, Info2) >  0),
+
+  %% Verify Balancing Complete: Info3
+  Equilibria = N / 3,  %% equilibrium
+  Threshold  = floor_value((QEQ / 100) * Equilibria), %% effective threshold
+  Balanced   = calc_balanced(Threshold, QArgs), %% the minimum number of ((Threshold * Nodes-1)
+
+  ?STATE_IDLE = pget(phase, Info3),
+  true = (pget(total,    Info3) == N),
+  true = (pget(position, Info3) >= 0),
+  true = (pget(balanced, Info3) >= Balanced),
+
+  %% Verify Stop: Info4
+  ?STATE_IDLE = pget(phase, Info4),
+  true = (pget(total,    Info4) == N),
+  true = (pget(position, Info4) == undefined),
+  true = (pget(balanced, Info4) >= Balanced),
+
+  %% Verify Reset: Info5
+  ?STATE_IDLE = pget(phase, Info5),
+  true = (pget(total,    Info5) == N),
+  true = (pget(position, Info5) == undefined),
+  true = (pget(balanced, Info5) == 0),
+
+  true = (ets:info(rabbit_queue_master_balancer, size) == undefined),
+
+  %% Verify Status
+  Pid  = pget(process_id, Status0),
+  true = is_pid_alive(Config, Pid),
+  true = (pget(process_id, Status1) == Pid),
+  true = (pget(process_id, Status2) == Pid),
+  true = (pget(process_id, Status5) == Pid),
+  true = (pget(queues_pending_balance, Status0) == 0),
+  true = (pget(queues_pending_balance, Status1) == N),
+  true = ?MIN_MASTERS_FILTER(QArgs,
+            fun() -> pget(queues_pending_balance, Status2) =:=  0 end,
+            fun() -> pget(queues_pending_balance, Status2) >    0 end),
+  true = (pget(queues_pending_balance, Status5) == 0),
+  true = (pget(memory_utilization,     Status5) >  0),
+
+  %% We Qualify Queue Equilibrium as follows;
+  %% => NumQueues >= QEQ% of Total
+  {ok, Report} = report(Config, A),
+
+  {queues, AQs} = pget(A, Report),
+  {queues, BQs} = pget(B, Report),
+  {queues, CQs} = pget(C, Report),
+
+  true = (AQs >= Threshold),
+  true = (BQs >= Threshold),
+  true = (CQs >= Threshold),
+
+  passed.
+
 %% ---------
 %% Internal
 %% ---------
 init_queues(Config, Node, NQs, NMsgs) ->
+  init_queues(Config, Node, NQs, [], NMsgs).
+
+init_queues(Config, Node, NQs, QArgs, NMsgs) ->
   Ch = rabbit_ct_client_helpers:open_channel(Config, Node),
   setup_exchange(Ch),
-  declare_queues(Ch, NQs),
+  declare_queues(Ch, QArgs, NQs),
   publish(Ch, NMsgs),
   {ok, Ch}.
 
@@ -340,10 +545,10 @@ setup_exchange(Ch) ->
                               type = <<"fanout">>},
     #'exchange.declare_ok'{} = amqp_channel:call(Ch, XD).
 
-declare_queues(Ch, NQs) ->
+declare_queues(Ch, QArgs, NQs) ->
  [begin
     QN = list_to_binary("test.q."++integer_to_list(N)),
-    QD = #'queue.declare'{queue = QN},
+    QD = #'queue.declare'{queue = QN, arguments = QArgs},
     #'queue.declare_ok'{} = amqp_channel:call(Ch, QD),
 
     #'queue.bind_ok'{} =
@@ -408,12 +613,16 @@ get_queue_names_and_nodes(Config) ->
    end || Q <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue, list, [])].
 
 setup_queue_master_balancer(Config, Node) ->
-  ok = rabbit_ct_broker_helpers:rpc(Config, Node,
-         ?MODULE, init_queue_master_balancer_remote, []).
+  setup_queue_master_balancer(Config, Node, ?TEST_QUEUE_EQUILIBRIUM).
 
-init_queue_master_balancer_remote() ->
+setup_queue_master_balancer(Config, Node, Equilibrium) ->
+  ok = rabbit_ct_broker_helpers:rpc(Config, Node,
+         ?MODULE, init_queue_master_balancer_remote, [Equilibrium]).
+
+init_queue_master_balancer_remote(Equilibrium) ->
   application:set_env(rabbitmq_queue_master_balancer, operational_priority, ?TEST_OPERATIONAL_PRIORITY),
   application:set_env(rabbitmq_queue_master_balancer, preload_queues, ?TEST_PRELOAD_QUEUES),
+  application:set_env(rabbitmq_queue_master_balancer, queue_equilibrium, Equilibrium),
   application:set_env(rabbitmq_queue_master_balancer, sync_delay_timeout, ?TEST_SYNC_DELAY_TIMEOUT),
   application:set_env(rabbitmq_queue_master_balancer, sync_verification_factor, ?TEST_SYNC_VERIFICATION_FACTOR),
   application:set_env(rabbitmq_queue_master_balancer, master_verification_timeout, ?TEST_MASTER_VERIFICATION_TIMEOUT),
@@ -539,3 +748,8 @@ wait_until_complete(Config, A, T) ->
             delay(T),
             wait_until_complete(Config, A, T)
     end.
+
+floor_value(V) -> math:floor(V).
+
+calc_balanced(Threshold, QArgs) ->
+  ?MIN_MASTERS_FILTER(QArgs, fun() -> 0 end, fun() -> floor_value(Threshold * 2) end).
