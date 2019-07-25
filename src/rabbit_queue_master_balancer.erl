@@ -338,12 +338,13 @@ shuffle(VHost, QN, Policy, MinMaster, _QPid, _SPids, Priority, PTD0, MVT, SDT, S
     User, M, T, QEQ) ->
   PTD =  ?UPDATE_RELATIVE(M, PTD0, ?PTD_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
   Pattern = list_to_binary(lists:concat(["^", binary_to_list(QN), "$"])),
+  RP = random_policy(QN),
   ok = policy_transition_delay(PTD),
   ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
-  ok = set_policy(VHost, QN, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
+  ok = set_policy(VHost, RP, Pattern, [{<<"ha-mode">>, <<"nodes">>},{<<"ha-params">>,
          [list_to_binary(atom_to_list(MinMaster))]}], Priority, <<"queues">>, User),
   ok = policy_transition_delay(PTD),
-  ok = delete_policy(VHost, QN, User),
+  ok = delete_policy(VHost, RP, User),
   ok = policy_transition_delay(PTD),
   ok = ensure_sync(VHost, QN, MVT, SDT, SVF),
   ok = reset_policy(Policy, PTD, User),
@@ -501,3 +502,7 @@ ensure_sync(VHost, QN, MVT, SDT, SVF) ->
                                    "Queue: ~p, Reason: ~p~n", [QN, Reason]),
             exit(Reason)
   end.
+
+random_policy(QN) ->
+  TS = integer_to_binary(ts()),
+  SP = << "." >>, << QN/binary, SP/binary, TS/binary >>.
