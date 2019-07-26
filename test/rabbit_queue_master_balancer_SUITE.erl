@@ -274,6 +274,11 @@ successful_run(Config, N, [A, B, C], Delay) ->
   Info2 = info(Config, A),
   Status2 = status(Config, A),
 
+  %% ensure intermediate operations during balancing don't
+  %% cause crash, i.e. loading queues during balance phase
+  {error, {not_allowed, {'$load_queues', ?STATE_BALANCING_QUEUES}}}
+    = load_queues(Config, A),
+
   %% Balance Pause: Info3
   ok    = pause(Config, A),
   Info3 = info(Config, A),

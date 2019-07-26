@@ -152,7 +152,11 @@ handle_sync_event('$info', _From, StateName, State) ->
   {reply, Reply, StateName, State};
 handle_sync_event('$report', _From, StateName, State) ->
   Reply = make_report(),
-  {reply, {ok, Reply}, StateName, State}.
+  {reply, {ok, Reply}, StateName, State};
+handle_sync_event(Op, _From, StateName, State = #state{phase = Phase}) ->
+  error_logger:info_msg("Queue Master Balancer operation '~p' not allowed "
+                        "in during phase '~p'", [Op, Phase]),
+  {reply, {error, {not_allowed, {Op, Phase}}}, StateName, State}.
 
 handle_event('$reset', _StateName, State) ->
   clear_queues(),
