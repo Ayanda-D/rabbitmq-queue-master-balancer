@@ -113,12 +113,12 @@ dep_accept = hex 0.3.5
 dep_cowboy = hex 2.6.1
 dep_cowlib = hex 2.7.0
 dep_jsx = hex 2.9.0
-dep_lager = hex 3.6.10
+dep_lager = hex 3.8.0
 dep_prometheus = hex 4.2.2
 dep_ra = git https://github.com/rabbitmq/ra.git master
 dep_ranch = hex 1.7.1
 dep_recon = hex 2.5.0
-dep_observer_cli = git https://github.com/zhongwencool/observer_cli 1.5.0
+dep_observer_cli = hex 1.5.2
 dep_stdout_formatter = hex 0.2.2
 dep_sysmon_handler = hex 1.1.0
 
@@ -183,6 +183,15 @@ RABBITMQ_COMPONENTS = amqp_client \
 		      rabbitmq_web_stomp \
 		      rabbitmq_web_stomp_examples \
 		      rabbitmq_website
+
+# Erlang.mk does not rebuild dependencies by default, once they were
+# compiled once, except for those listed in the `$(FORCE_REBUILD)`
+# variable.
+#
+# We want all RabbitMQ components to always be rebuilt: this eases
+# the work on several components at the same time.
+
+FORCE_REBUILD = $(RABBITMQ_COMPONENTS)
 
 # Several components have a custom erlang.mk/build.config, mainly
 # to disable eunit. Therefore, we can't use the top-level project's
@@ -311,15 +320,15 @@ prepare-dist::
 
 ifneq ($(wildcard ../../UMBRELLA.md),)
 UNDER_UMBRELLA = 1
+DEPS_DIR ?= $(abspath ..)
+else ifneq ($(wildcard ../../../../UMBRELLA.md),)
+UNDER_UMBRELLA = 1
+DEPS_DIR ?= $(abspath ../../..)
 else ifneq ($(wildcard UMBRELLA.md),)
 UNDER_UMBRELLA = 1
 endif
 
 ifeq ($(UNDER_UMBRELLA),1)
-ifneq ($(PROJECT),rabbitmq_public_umbrella)
-DEPS_DIR ?= $(abspath ..)
-endif
-
 ifneq ($(filter distclean distclean-deps,$(MAKECMDGOALS)),)
 SKIP_DEPS = 1
 endif
