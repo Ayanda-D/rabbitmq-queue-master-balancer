@@ -293,6 +293,8 @@ to_info(#state{parent_pid         = PPid,
    {policy_transition_delay, PTD},
    {last_balance_timestamp,  TS}].
 
+balance_queue({undefined, QN}, _Priority, _PTD, _MVT, _SDT, _SVF, _T, _QEQ) ->
+    {ok, QN, false};
 balance_queue(Q, Priority, PTD, MVT, SDT, SVF, T, QEQ) ->
     %% Aqcuire Min-master
     {ok, MinMaster} =
@@ -401,8 +403,10 @@ fetch_current_status() ->
      {'memory_utilization', Memory}].
 
 get_queue(VHost, QN) ->
-  {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, QN)),
-  Q.
+  case rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, QN)) of
+    {ok, Q} -> Q;
+    _       -> {undefined, QN}
+  end.
 
 get_queue_node(AMQQueue) ->
   node(case AMQQueue of
@@ -495,11 +499,14 @@ validate_equilibrium(QEQ) ->
 
 ensure_sync(VHost, QN, MVT, SDT, SVF) ->
   try
-      ok = rabbit_queue_master_balancer_sync:verify_master(VHost, QN, MVT, SVF),
-      AMQQueue = get_queue(VHost, QN),
-      SPids = get_queue_spids(AMQQueue),
-      ok = rabbit_queue_master_balancer_sync:sync_mirrors(AMQQueue),
-      ok = rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SDT, SVF)
+      case get_queue(VHost, QN) of
+        {undefined, QN} -> ok;
+        AMQQueue ->
+            ok = rabbit_queue_master_balancer_sync:verify_master(VHost, QN, MVT, SVF),
+            SPids = get_queue_spids(AMQQueue),
+            ok = rabbit_queue_master_balancer_sync:sync_mirrors(AMQQueue),
+            ok = rabbit_queue_master_balancer_sync:verify_sync(VHost, QN, SPids, SDT, SVF)
+      end
   catch
       _:Reason ->
             error_logger:error_msg("Queue Master Balancer synchronisation error. "
