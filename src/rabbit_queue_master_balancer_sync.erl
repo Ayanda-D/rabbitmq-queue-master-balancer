@@ -30,7 +30,7 @@
 % ----------------------------------------------------------------
 
 sync_mirrors(Q) ->
-  _Any = rabbit_amqqueue:sync_mirrors(Q),
+  _Any = safe_queue_call(Q, fun() -> rabbit_amqqueue:sync_mirrors(Q) end, ok),
   ok.
 
 verify_sync(VHost, QN, SPids) ->
@@ -60,14 +60,11 @@ verify_sync(VHost, SynchPPid, SynchRef, SynchPeriod, DelayFactor, QN, SPids) ->
 
 synchronised_slave_pids(VHost, Queue, SynchPeriod) ->
     ?DELAY(SynchPeriod),
-    {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, Queue)),
-    SSP = synchronised_slave_pids,
-    MGS = messages,
-    [{SSP, Pids},{MGS, Msgs}] = rabbit_amqqueue:info(Q, [SSP, MGS]),
-    case {Pids, Msgs} of
-        {'', _} -> {[], Msgs};
-        {_,  _} -> {Pids, Msgs}
-    end.
+    QMetrics = rabbit_queue_master_balancer:queue_metrics(
+                   rabbit_misc:r(VHost, queue, Queue)),
+    Pids = rabbit_misc:pget(synchronised_slave_pids, QMetrics, []),
+    Msgs = rabbit_misc:pget(messages_ram, QMetrics, 0),
+    {Pids, Msgs}.
 
 verify_master(VHost, QN) ->
     verify_master(VHost, QN, ?DEFAULT_MASTER_VERIFICATION_TIMEOUT).
@@ -95,21 +92,17 @@ verify_master(VHost, VerifierPPid, VerifierRef, VerifierPeriod, X, QN) ->
 
 is_queue_master_alive(VHost, Queue, VerifierPeriod, X) ->
     ?DELAY(VerifierPeriod),
-    {ok, Q} = rabbit_amqqueue:lookup(rabbit_misc:r(VHost, queue, Queue)),
-    MGS = messages,
-    [{MGS, Msgs}] = rabbit_amqqueue:info(Q, [MGS]),
+    QResource = rabbit_misc:r(VHost, queue, Queue),
+    {ok, Q}   = rabbit_amqqueue:lookup(QResource),
+    QMetrics  = rabbit_queue_master_balancer:queue_metrics(QResource),
+    Msgs = rabbit_misc:pget(messages_ram, QMetrics, 0),
     VerifierPeriod0 = ?UPDATE_RELATIVE(Msgs, X, ?SYNC_THRESHOLD, ?DEFAULT_SYNC_VERIFICATION_FACTOR),
     {Pid, State} = get_pid_and_state(Q),
     {is_pid_alive(Pid) andalso (State =:= live), VerifierPeriod0}.
 
-%% Queue process can now be exisisting on remote node after migration operations
+%% Queue process can now be existing on remote node after migration operations
 is_pid_alive(Pid) when is_pid(Pid) ->
-    LocalNode = node(),
-    case node(Pid) of
-        LocalNode -> is_process_alive(Pid);
-        RemoteNode ->
-            rpc:call(RemoteNode, erlang, is_process_alive, [Pid])
-    end.
+    rpc:call(node(Pid), erlang, is_process_alive, [Pid]).
 
 get_pid_and_state(AMQQueue) ->
   case AMQQueue of
@@ -120,4 +113,11 @@ get_pid_and_state(AMQQueue) ->
       {amqqueue,{resource, _, queue, _},_,_,_,_,Pid,_,_,_,_,_,_,_,State,_,_,_,_} ->
          {Pid, State};
       Other -> error({unsupported_version, Other})
+  end.
+
+safe_queue_call(AMQQueue, OpFun, Default) ->
+  {Pid, _State} = get_pid_and_state(AMQQueue),
+  case is_process_alive(Pid) of
+      true  -> OpFun();
+      false -> Default
   end.

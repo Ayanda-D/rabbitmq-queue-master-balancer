@@ -449,8 +449,9 @@ get_policy_trans_delay() ->
 policy_transition_delay(PTD) -> ?DELAY(PTD).
 
 messages(Q) ->
-  [{messages, Messages}] = rabbit_amqqueue:info(Q, [messages]),
-    Messages.
+  QResource = {resource, _VHost, queue, _QName} = element(2, Q),
+  QMetrics  = queue_metrics(QResource),
+  _Msgs = rabbit_misc:pget(messages_ram, QMetrics, 0).
 
 get_acting_user(Q) ->
   case rabbit_misc:version_compare(rabbit_misc:version(), "3.7.0") of
@@ -517,3 +518,16 @@ ensure_sync(VHost, QN, MVT, SDT, SVF) ->
 random_policy(QN) ->
   TS = integer_to_binary(ts()),
   SP = << "." >>, << QN/binary, SP/binary, TS/binary >>.
+
+queue_metrics(QResource) ->
+  cluster_wide_core_metrics_match(queue_metrics, {QResource, '$0', '_'}).
+
+cluster_wide_core_metrics_match(CoreMetricsTab, MatchSpec)
+  when is_atom(CoreMetricsTab) ->
+    lists:flatten(
+        lists:map(fun(N) ->
+                      case rpc:call(N, ets, match, [CoreMetricsTab, MatchSpec]) of
+                          {badrpc, _} -> [];
+                          Result      -> Result
+                      end
+                  end, rabbit_nodes:all_running())).
