@@ -31,7 +31,10 @@ In addition, regardless of its current state, the Queue Master Balancer plugin i
 
 ## Supported RabbitMQ Versions
 
-This plugin is compatible with RabbitMQ 3.6.x and beyond (3.7.x), to the latest release.
+This plugin is compatible with RabbitMQ 3.6.x and 3.7.x.
+
+**NOTE:** RabbitMQ 3.8.x, use the new `rabbitmq-queues rebalance` command:
+https://www.rabbitmq.com/rabbitmq-queues.8.html#rebalance
 
 
 ## Installation
